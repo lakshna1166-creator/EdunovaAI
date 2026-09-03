@@ -39,6 +39,35 @@ const getTransporter = async () => {
 };
 
 /**
+ * Format FROM address cleanly with display name and configured email
+ */
+const getFromAddress = () => {
+  const configuredFrom = (process.env.SMTP_FROM || process.env.SMTP_USER || "").trim();
+  if (!configuredFrom) {
+    return '"EduNovaAI" <support@edunova.ai>';
+  }
+  if (configuredFrom.includes("<") && configuredFrom.includes(">")) {
+    return configuredFrom;
+  }
+  return `"EduNovaAI" <${configuredFrom}>`;
+};
+
+/**
+ * Check if recipient email belongs to a dummy or test domain
+ */
+const isDummyEmail = (email) => {
+  if (!email || typeof email !== "string") return true;
+  const domain = email.split("@")[1]?.toLowerCase() || "";
+  return (
+    domain === "example.com" ||
+    domain === "example.org" ||
+    domain === "example.net" ||
+    domain === "test.com" ||
+    domain === "edunova.ai"
+  );
+};
+
+/**
  * Send Password Reset Email to Student
  * 
  * @param {string} toEmail - Student recipient email
@@ -46,11 +75,21 @@ const getTransporter = async () => {
  * @param {string} studentName - Student's name
  */
 export const sendPasswordResetEmail = async (toEmail, resetUrl, studentName = "Student") => {
-  const fromAddress = process.env.SMTP_FROM || '"EduNovaAI Support" <support@edunova.ai>';
+  const fromAddress = getFromAddress();
+  const replyToAddress = process.env.SMTP_USER || fromAddress;
+
+  console.log(`📨 [Password Reset Request] Recipient: ${toEmail}`);
+  console.log(`📤 [Sending Email] FROM: ${fromAddress} | TO: ${toEmail}`);
+
+  if (process.env.NODE_ENV === "test" || isDummyEmail(toEmail)) {
+    console.log(`🧪 [Test / Dummy Recipient] Skipped live SMTP delivery for: ${toEmail}`);
+    return { success: true, messageId: `<mock-reset-${Date.now()}@edunova.local>`, previewUrl: resetUrl };
+  }
 
   const mailOptions = {
     from: fromAddress,
     to: toEmail,
+    replyTo: replyToAddress,
     subject: "Reset your EduNovaAI password",
     text: `Hello ${studentName},\n\nYou requested a password reset for your EduNovaAI account.\n\nPlease click the link below to set a new password:\n${resetUrl}\n\nThis link will expire in 1 hour.\nIf you did not request this reset, you can safely ignore this email.\n\nBest regards,\nThe EduNovaAI Team`,
     html: `
@@ -97,35 +136,20 @@ export const sendPasswordResetEmail = async (toEmail, resetUrl, studentName = "S
     const mailer = await getTransporter();
     const info = await mailer.sendMail(mailOptions);
     
-    if (nodemailer.getTestMessageUrl(info)) {
-      console.log("📨 [Password Reset Email Preview URL]:", nodemailer.getTestMessageUrl(info));
-    } else {
-      console.log("📨 [Password Reset Email Sent]:", info.messageId || "Delivered");
+    console.log(`✅ [Password Reset Sent] Message ID: ${info.messageId || "Delivered"}`);
+    console.log(`📬 [SMTP Response]: ${info.response || "250 OK"}`);
+    console.log(`📥 [Accepted Recipients]: ${JSON.stringify(info.accepted || [])}`);
+    if (info.rejected && info.rejected.length > 0) {
+      console.warn(`⚠️ [Rejected Recipients]: ${JSON.stringify(info.rejected)}`);
     }
 
     return { success: true, messageId: info.messageId || "Delivered", previewUrl: nodemailer.getTestMessageUrl(info) || resetUrl };
   } catch (sendError) {
-    console.error("⚠️ Password reset email delivery failed:", sendError.message);
+    console.error(`❌ [Password Reset Failed] Recipient: ${toEmail} | Code: ${sendError.code || "UNKNOWN"} | Error: ${sendError.message}`);
     throw new Error("Password reset email could not be sent. Please verify the SMTP settings.");
   }
 };
 
-
-export const sendVerificationCodeEmail = async (toEmail, code, studentName = "Student") => {
-  const fromAddress = process.env.SMTP_FROM || '"EduNovaAI" <support@edunova.ai>';
-  const mailOptions = {
-    from: fromAddress,
-    to: toEmail,
-    subject: "Your EduNovaAI verification code",
-    text: `Hello ${studentName},\n\nYour EduNovaAI verification code is ${code}. It expires in 10 minutes.\n\nIf you did not create this account, you can ignore this email.\n\nThe EduNovaAI Team`,
-    html: `<!DOCTYPE html><html><body style="margin:0;background:#f8fbff;font-family:Arial,sans-serif;color:#0f172a;padding:28px"><div style="max-width:520px;margin:auto;background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:32px"><div style="font-size:22px;font-weight:800;color:#4f46e5">EduNovaAI</div><h2>Verify your email</h2><p>Hello ${studentName},</p><p>Use this code to verify your EduNovaAI account:</p><div style="font-size:34px;font-weight:800;letter-spacing:10px;text-align:center;padding:18px;background:#f5f7ff;border-radius:14px;color:#4f46e5">${code}</div><p style="color:#64748b;font-size:13px">This code expires in 10 minutes.</p></div></body></html>`
-  };
-  const mailer = await getTransporter();
-  const info = await mailer.sendMail(mailOptions);
-  const previewUrl = nodemailer.getTestMessageUrl(info) || null;
-  console.log("📨 [Verification Email]", info.messageId || "Delivered", previewUrl || "");
-  return { success: true, messageId: info.messageId || "Delivered", previewUrl };
-};
 export const verifyEmailTransport = async () => {
   try {
     const mailer = await getTransporter();
@@ -134,12 +158,13 @@ export const verifyEmailTransport = async () => {
     console.log("✅ SMTP connection verified successfully.");
     return true;
   } catch (error) {
-    console.error("❌ SMTP connection failed:", error.message);
+    console.error(`❌ SMTP connection failed: ${error.message} (Code: ${error.code || "UNKNOWN"})`);
     return false;
   }
 };
 
 export default {
   sendPasswordResetEmail,
-  sendVerificationCodeEmail
+  verifyEmailTransport
 };
+

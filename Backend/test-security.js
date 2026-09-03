@@ -11,8 +11,11 @@
  * 7. Error Handling & Payload Parsing
  */
 
+process.env.NODE_ENV = 'test';
+
 import express from 'express';
 import cors from 'cors';
+import supabase from './config/supabase.js';
 import authRoutes from './routes/authRoutes.js';
 import studentRoutes from './routes/studentRoutes.js';
 import aiRoutes from './routes/aiRoutes.js';
@@ -221,7 +224,7 @@ const server = app.listen(TEST_PORT, async () => {
     studentBToken = regStudentBRes.data?.token;
     record(
       "Register: Valid Student B (201 Created + role=student + JWT)",
-      regStudentBRes.status === 201 && !!studentBToken,
+      regStudentBRes.status === 201 && regStudentBRes.data?.user?.role === "student" && !!studentBToken,
       `Status: ${regStudentBRes.status}, User ID: ${regStudentBRes.data?.user?.id || "N/A"}`
     );
 
@@ -233,9 +236,17 @@ const server = app.listen(TEST_PORT, async () => {
       method: "POST",
       body: JSON.stringify({ email: studentAEmail, password: testPassword })
     });
+    studentAToken = loginValidRes.data?.token;
+
+    const loginValidBRes = await makeRequest("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email: studentBEmail, password: testPassword })
+    });
+    studentBToken = loginValidBRes.data?.token;
+
     record(
       "Login: Valid credentials (200 OK + JWT)",
-      loginValidRes.status === 200 && !!loginValidRes.data?.token,
+      loginValidRes.status === 200 && !!studentAToken,
       `Status: ${loginValidRes.status}, Role: ${loginValidRes.data?.user?.role}`
     );
 

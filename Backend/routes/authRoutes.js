@@ -6,9 +6,7 @@ import {
   forgotPassword,
   resetPassword,
   getMe,
-  updateProfile,
-  verifyEmail,
-  resendVerification
+  updateProfile
 } from "../controllers/authController.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 import { authLimiter } from "../middleware/rateLimiter.js";
@@ -28,8 +26,6 @@ router.post("/login", authLimiter, validateLogin, login);
 router.post("/logout", logout);
 router.post("/forgot-password", authLimiter, validateForgotPassword, forgotPassword);
 router.post("/reset-password", authLimiter, validateResetPassword, resetPassword);
-router.post("/verify-email", authLimiter, verifyEmail);
-router.post("/resend-verification", authLimiter, resendVerification);
 
 // Protected Student Profile Endpoints (Requires Valid JWT Bearer Token)
 router.get("/me", authMiddleware, getMe);

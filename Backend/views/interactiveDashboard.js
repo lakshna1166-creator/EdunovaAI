@@ -456,7 +456,7 @@ JWT_SECRET=edumind_ai_hackathon_super_secret_jwt_key_2026
         <h3 style="font-size: 1rem; color: #60A5FA; margin: 16px 0 10px;">Auth Routes (/api/auth)</h3>
         <div class="endpoint-item">
           <div><span class="endpoint-method method-post">POST</span><span class="endpoint-path">/api/auth/register</span></div>
-          <span style="color: var(--text-muted); font-size: 0.85rem;">Register a student with Argon2 and email verification</span>
+          <span style="color: var(--text-muted); font-size: 0.85rem;">Register a student with Argon2 and direct JWT authentication</span>
         </div>
         <div class="endpoint-item">
           <div><span class="endpoint-method method-post">POST</span><span class="endpoint-path">/api/auth/login</span></div>

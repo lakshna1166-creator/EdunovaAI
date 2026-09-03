@@ -2,7 +2,7 @@ import crypto from "crypto";
 import argon2 from "argon2";
 import jwt from "jsonwebtoken";
 import supabase from "../config/supabase.js";
-import { sendPasswordResetEmail, sendVerificationCodeEmail } from "../config/email.js";
+import { sendPasswordResetEmail } from "../config/email.js";
 
 // In-memory token store as fallback if database doesn't have reset_token columns
 const passwordResetStore = new Map();
@@ -84,7 +84,7 @@ export const register = async (req, res, next) => {
         name: name.trim(),
         email: normalizedEmail,
         password: hashedPassword,
-        email_verified: false
+        email_verified: true
       })
       .select("id, name, email, created_at")
       .single();
@@ -122,30 +122,24 @@ export const register = async (req, res, next) => {
       console.warn("Optional profile table creation note:", profileErr.message);
     }
 
-    // 3. Generate and email a one-time verification code before activation
-    const verificationCode = String(crypto.randomInt(100000, 1000000));
-    const verificationHash = crypto.createHash("sha256").update(verificationCode).digest("hex");
-    const verificationExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-    const { error: verificationUpdateError } = await supabase.from("users").update({
-      verification_code_hash: verificationHash,
-      verification_expires_at: verificationExpiresAt
-    }).eq("id", newUser.id);
-    if (verificationUpdateError) {
-      console.error("Could not store verification code:", verificationUpdateError);
-      return res.status(500).json({ success:false, message:"Account created, but email verification could not be initialized. Please try again." });
-    }
-    try {
-      await sendVerificationCodeEmail(newUser.email, verificationCode, newUser.name);
-    } catch (mailError) {
-      console.error("Verification email failed:", mailError);
-      return res.status(502).json({ success:false, message:"Account was created, but the verification email could not be sent. Check SMTP settings and resend the code." });
-    }
+    // 3. Generate JWT Token for immediate authenticated session
+    const token = generateToken(newUser);
 
     return res.status(201).json({
       success: true,
-      message: "Account created. Check your email for the verification code.",
-      needsVerification: true,
-      user: { id:newUser.id, name:newUser.name, email:newUser.email, role:"student" }
+      message: "Account created successfully.",
+      token,
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        role: "student",
+        profile: profileData || {
+          grade_level: gradeLevel || "Undergraduate / General",
+          streak_days: 0,
+          total_xp: 0
+        }
+      }
     });
   } catch (error) {
     console.error("Register Exception:", error);
@@ -193,10 +187,6 @@ export const login = async (req, res, next) => {
       return res.status(401).json({ success:false, message: genericAuthErrorMessage });
     }
 
-    if (user.email_verified !== true) {
-      return res.status(403).json({ success:false, needsVerification:true, email:user.email, message:"Please verify your email before signing in." });
-    }
-
     // Fetch student profile details
     let profileData = null;
     try {
@@ -233,41 +223,6 @@ export const login = async (req, res, next) => {
     console.error("Login Exception:", error);
     next(error);
   }
-};
-
-/** Verify the email OTP sent during registration */
-export const verifyEmail = async (req, res, next) => {
-  try {
-    const normalizedEmail = String(req.body?.email || "").toLowerCase().trim();
-    const code = String(req.body?.code || "").trim();
-    if (!normalizedEmail || !/^\d{6}$/.test(code)) return res.status(400).json({ success:false, message:"Enter the 6-digit verification code." });
-    const { data:user, error } = await supabase.from("users").select("id,name,email,email_verified,verification_code_hash,verification_expires_at").eq("email", normalizedEmail).maybeSingle();
-    if (error || !user) return res.status(400).json({ success:false, message:"We could not find an account with that email." });
-    if (user.email_verified) return res.status(200).json({ success:true, message:"Email is already verified." });
-    if (!user.verification_code_hash || !user.verification_expires_at || new Date(user.verification_expires_at).getTime() < Date.now()) return res.status(400).json({ success:false, message:"This code has expired. Request a new code." });
-    const hash = crypto.createHash("sha256").update(code).digest("hex");
-    if (hash !== user.verification_code_hash) return res.status(400).json({ success:false, message:"Incorrect verification code." });
-    const { error:updateError } = await supabase.from("users").update({ email_verified:true, verification_code_hash:null, verification_expires_at:null }).eq("id", user.id);
-    if (updateError) throw updateError;
-    return res.status(200).json({ success:true, message:"Email verified successfully." });
-  } catch(error) { next(error); }
-};
-
-/** Resend email verification OTP */
-export const resendVerification = async (req, res, next) => {
-  try {
-    const normalizedEmail = String(req.body?.email || "").toLowerCase().trim();
-    const { data:user } = await supabase.from("users").select("id,name,email,email_verified").eq("email", normalizedEmail).maybeSingle();
-    if (!user) return res.status(200).json({ success:true, message:"If the account exists, a verification code has been sent." });
-    if (user.email_verified) return res.status(400).json({ success:false, message:"This email is already verified. You can sign in." });
-    const code = String(crypto.randomInt(100000,1000000));
-    const hash = crypto.createHash("sha256").update(code).digest("hex");
-    const expires = new Date(Date.now()+10*60*1000).toISOString();
-    const { error:updateError } = await supabase.from("users").update({verification_code_hash:hash,verification_expires_at:expires}).eq("id",user.id);
-    if(updateError) throw updateError;
-    await sendVerificationCodeEmail(user.email,code,user.name);
-    return res.status(200).json({success:true,message:"A new verification code has been sent to your email."});
-  } catch(error){ next(error); }
 };
 
 /**

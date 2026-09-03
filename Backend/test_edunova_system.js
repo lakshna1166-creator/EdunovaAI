@@ -1,3 +1,5 @@
+process.env.NODE_ENV = 'test';
+
 import express from 'express';
 import cors from 'cors';
 import supabase from './config/supabase.js';
