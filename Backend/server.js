@@ -47,7 +47,7 @@ const configuredFrontendUrls = process.env.FRONTEND_URL
   : [];
 
 const defaultDevOrigins = [
-  "https://edunova-ai-delta.vercel.app/"
+  "https://edunova-ai-delta.vercel.app"
 ];
 
 const allowedOrigins = isProduction
