@@ -12,7 +12,7 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 # Load all configured Gemini keys (1-7). Empty/missing keys are ignored.
 # Key rotation happens transparently inside the centralized Gemini key manager.
 GEMINI_API_KEYS = []
-for i in range(1, 8):
+for i in range(1, 10):
     key = os.getenv(f"GEMINI_API_KEY_{i}", "").strip()
     if key:
         GEMINI_API_KEYS.append(key)
