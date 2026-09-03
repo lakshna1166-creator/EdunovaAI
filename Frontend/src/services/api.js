@@ -51,6 +51,9 @@ export const getCurrentUser = () => {
 /**
  * Core Fetch Wrapper
  */
+/**
+ * Core Fetch Wrapper
+ */
 async function request(endpoint, options = {}) {
   const url = `${API_BASE_URL}${endpoint}`;
   const token = getToken();
@@ -63,28 +66,50 @@ async function request(endpoint, options = {}) {
     ...options.headers
   };
 
+  const controller = new AbortController();
+
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, 20000);
+
+  let response;
+
   try {
-    const response = await fetch(url, {
+    response = await fetch(url, {
       ...options,
-      headers
+      headers,
+      signal: controller.signal
     });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      const error = new Error(data.message || `Request failed with status ${response.status}`);
-      error.status = response.status;
-      error.data = data;
-      throw error;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error(
+        'The server took too long to respond. Please try again.'
+      );
     }
 
-    return data;
-  } catch (err) {
-    console.error(`API Error [${options.method || 'GET'} ${endpoint}]:`, err.message);
-    throw err;
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-}
 
+  let data;
+
+  try {
+    data = await response.json();
+  } catch {
+    data = {};
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      data.message ||
+      data.error ||
+      `Request failed with status ${response.status}`
+    );
+  }
+
+  return data;
+}
 // ============================================================================
 // STUDENT AUTHENTICATION API
 // ============================================================================

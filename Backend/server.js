@@ -11,6 +11,7 @@ dotenv.config();
 
 // Configuration & Clients
 import supabase from "./config/supabase.js";
+import { verifyEmailTransport } from "./config/email.js";
 
 // Routes
 import authRoutes from "./routes/authRoutes.js";
