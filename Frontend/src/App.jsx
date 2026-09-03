@@ -17,7 +17,6 @@ import LoginPage from './pages/public/LoginPage';
 import SignupPage from './pages/public/SignupPage';
 import ForgotPasswordPage from './pages/public/ForgotPasswordPage';
 import ResetPasswordPage from './pages/public/ResetPasswordPage';
-import VerifyEmailPage from './pages/public/VerifyEmailPage';
 import StudentIntroPage from './pages/public/StudentIntroPage';
 
 // Student Protected Pages
@@ -49,7 +48,6 @@ export default function App() {
             <Route path="signup" element={<SignupPage />} />
             <Route path="forgot-password" element={<ForgotPasswordPage />} />
             <Route path="reset-password" element={<ResetPasswordPage />} />
-            <Route path="verify-email" element={<VerifyEmailPage />} />
           </Route>
 
           {/* Protected Student Suite Routes */}

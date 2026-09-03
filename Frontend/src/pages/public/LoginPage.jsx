@@ -22,7 +22,6 @@ export default function LoginPage() {
     try {
       const result = await login(email, password);
       if (result.success) navigate(fromPath, { replace: true });
-      else if (result.needsVerification) navigate(`/verify-email?email=${encodeURIComponent(email)}`);
       else setErrorMessage(result.message || 'Invalid email or password.');
     } catch (error) {
       setErrorMessage(error.message || 'Invalid email or password.');

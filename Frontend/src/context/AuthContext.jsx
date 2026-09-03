@@ -51,7 +51,6 @@ export const AuthProvider = ({ children }) => {
     try {
       const res = await authApi.login({ email, password });
       if (res && res.success) {
-        if (res.needsVerification) return { success:true, needsVerification:true, user:res.user };
         const receivedUser = res.user;
         const receivedToken = res.token;
         setUser(receivedUser);
@@ -63,13 +62,12 @@ export const AuthProvider = ({ children }) => {
     } catch (err) {
       return {
         success: false,
-        needsVerification: !!err.data?.needsVerification,
         message: err.data?.message || err.message || 'Invalid email or password.'
       };
     }
   };
 
-  // Student Registration (Always student role)
+  // Student Registration (Direct account creation)
   const register = async ({ name, email, password, confirmPassword, preferredLanguage, gradeLevel }) => {
     try {
       const res = await authApi.register({
@@ -82,13 +80,14 @@ export const AuthProvider = ({ children }) => {
       });
 
       if (res && res.success) {
-        if (res.needsVerification) return { success:true, needsVerification:true, user:res.user };
         const receivedUser = res.user;
         const receivedToken = res.token;
-        setUser(receivedUser);
-        setToken(receivedToken);
-        setAuthSession(receivedToken, receivedUser);
-        return { success: true, user: receivedUser };
+        if (receivedToken && receivedUser) {
+          setUser(receivedUser);
+          setToken(receivedToken);
+          setAuthSession(receivedToken, receivedUser);
+        }
+        return { success: true, user: receivedUser, message: res.message };
       }
       return { success: false, message: res?.message || 'Registration failed' };
     } catch (err) {

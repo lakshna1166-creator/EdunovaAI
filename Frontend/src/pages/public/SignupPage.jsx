@@ -22,7 +22,7 @@ export default function SignupPage() {
     setLoading(true);
     try {
       const result = await register(formData);
-      if (result.success) navigate(`/verify-email?email=${encodeURIComponent(formData.email)}`, { replace:true });
+      if (result.success) navigate('/dashboard', { replace:true });
       else setErrorMessage(result.message || 'Registration failed. Please try again.');
     } catch (error) { setErrorMessage(error.message || 'Registration failed. Please try again.'); }
     finally { setLoading(false); }
@@ -40,7 +40,6 @@ export default function SignupPage() {
           <label className="auth-field"><span>Email address</span><div className="auth-input-wrap"><Mail size={17}/><input name="email" type="email" placeholder="you@example.com" value={formData.email} onChange={handleChange} required /></div></label>
           <label className="auth-field"><span>Password</span><div className="auth-input-wrap"><Lock size={17}/><input name="password" type={showPassword ? 'text':'password'} placeholder="8+ characters, letters & numbers" value={formData.password} onChange={handleChange} required /><PasswordIcon visible={showPassword} onClick={() => setShowPassword(v=>!v)}/></div></label>
           <label className="auth-field"><span>Confirm password</span><div className="auth-input-wrap"><Lock size={17}/><input name="confirmPassword" type={showConfirm ? 'text':'password'} placeholder="Re-enter your password" value={formData.confirmPassword} onChange={handleChange} required /><PasswordIcon visible={showConfirm} onClick={() => setShowConfirm(v=>!v)}/></div></label>
-          <div className="auth-password-note"><CheckCircle2 size={15}/> Your email will be verified before your account is activated.</div>
           <Button variant="primary" size="lg" type="submit" disabled={loading} className="auth-submit">{loading ? <><Loader2 size={18} className="spin"/> Creating account...</> : <>Create account <ArrowRight size={18}/></>}</Button>
         </form>
         <div className="auth-divider"><span>Already have an account?</span></div>

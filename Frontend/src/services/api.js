@@ -119,8 +119,6 @@ export const authApi = {
   logout: () => request('/auth/logout', { method: 'POST' }),
   forgotPassword: (payload) => request('/auth/forgot-password', { method: 'POST', body: JSON.stringify(payload) }),
   resetPassword: (payload) => request('/auth/reset-password', { method: 'POST', body: JSON.stringify(payload) }),
-  verifyEmail: (payload) => request('/auth/verify-email', { method: 'POST', body: JSON.stringify(payload) }),
-  resendVerification: (payload) => request('/auth/resend-verification', { method: 'POST', body: JSON.stringify(payload) }),
   getMe: () => request('/auth/me', { method: 'GET' }),
   updateProfile: (payload) => request('/auth/profile', { method: 'PUT', body: JSON.stringify(payload) })
 };
