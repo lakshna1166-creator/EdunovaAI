@@ -11,6 +11,7 @@ dotenv.config();
 
 // Configuration & Clients
 import supabase from "./config/supabase.js";
+import { verifyEmailTransport } from "./config/email.js";
 
 // Routes
 import authRoutes from "./routes/authRoutes.js";
@@ -41,33 +42,71 @@ app.use(
 // ============================================================================
 // CORS CONFIGURATION
 // ============================================================================
+
 const isProduction = process.env.NODE_ENV === "production";
+
 const configuredFrontendUrls = process.env.FRONTEND_URL
-  ? process.env.FRONTEND_URL.split(",").map((url) => url.trim()).filter(Boolean)
+  ? process.env.FRONTEND_URL
+      .split(",")
+      .map((url) => url.trim().replace(/\/$/, ""))
+      .filter(Boolean)
   : [];
 
-const defaultDevOrigins = [
-  "https://edunova-ai-delta.vercel.app"
+const defaultOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://edunovaai.onrender.com"
 ];
 
-const allowedOrigins = isProduction
-  ? configuredFrontendUrls
-  : [...new Set([...defaultDevOrigins, ...configuredFrontendUrls])];
+const allowedOrigins = [
+  ...new Set([
+    ...defaultOrigins,
+    ...configuredFrontendUrls
+  ])
+];
+
+console.log("🌐 Allowed CORS Origins:", allowedOrigins);
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow non-browser requests (Postman, curl, server-to-server)
-    if (!origin) return callback(null, true);
-
-    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin) || !isProduction) {
+    // Allow non-browser requests such as Postman, curl and server-to-server
+    if (!origin) {
       return callback(null, true);
     }
 
-    return callback(new Error(`CORS Error: Origin '${origin}' is not authorized.`));
+    const cleanOrigin = origin.replace(/\/$/, "");
+
+    if (allowedOrigins.includes(cleanOrigin)) {
+      return callback(null, true);
+    }
+
+    console.error(
+      `❌ CORS blocked origin: ${origin}`
+    );
+
+    return callback(
+      new Error(
+        `CORS Error: Origin '${origin}' is not authorized.`
+      )
+    );
   },
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+
+  methods: [
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "OPTIONS"
+  ],
+
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization"
+  ],
+
   credentials: true,
+
   optionsSuccessStatus: 200
 };
 

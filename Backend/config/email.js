@@ -18,14 +18,19 @@ const getTransporter = async () => {
 
   if (smtpHost && smtpUser && smtpPass) {
     transporter = nodemailer.createTransport({
-      host: smtpHost,
-      port: Number(smtpPort) || 587,
-      secure: Number(smtpPort) === 465,
-      auth: {
-        user: smtpUser,
-        pass: smtpPass
-      }
-    });
+  host: smtpHost,
+  port: Number(smtpPort) || 587,
+  secure: Number(smtpPort) === 465,
+  auth: {
+    user: smtpUser,
+    pass: smtpPass
+  },
+
+  // Prevent signup from hanging indefinitely
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 15000
+});
   } else {
     throw new Error("SMTP is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM in Backend/.env to send real emails.");
   }
@@ -120,6 +125,18 @@ export const sendVerificationCodeEmail = async (toEmail, code, studentName = "St
   const previewUrl = nodemailer.getTestMessageUrl(info) || null;
   console.log("📨 [Verification Email]", info.messageId || "Delivered", previewUrl || "");
   return { success: true, messageId: info.messageId || "Delivered", previewUrl };
+};
+export const verifyEmailTransport = async () => {
+  try {
+    const mailer = await getTransporter();
+    await mailer.verify();
+
+    console.log("✅ SMTP connection verified successfully.");
+    return true;
+  } catch (error) {
+    console.error("❌ SMTP connection failed:", error.message);
+    return false;
+  }
 };
 
 export default {
