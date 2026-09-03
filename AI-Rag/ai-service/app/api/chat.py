@@ -8,9 +8,7 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from app.llm.client import GeminiClient
-from app.llm.omni_client import OmniClient
-from app.llm.unified import classify_llm_error
+from app.llm.unified import GeminiLLMClient, classify_llm_error
 from app.rag.answer import answer_question
 
 logger = logging.getLogger(__name__)
@@ -63,22 +61,10 @@ def _handle_llm_error(exc: Exception) -> JSONResponse:
     - "unavailable": HTTP 503 with a service-unavailable message.
     - "other": HTTP 500 with a generic internal-error message.
     """
-    # Prefer each client's own classifier (covers provider-specific keywords),
-    # then fall back to the unified classifier for cross-provider messages
-    # (e.g. legacy "Gemini API quota..." strings raised in tests/mocks).
-    error_type = "other"
-    try:
-        error_type, _ = OmniClient._classify_error(exc)
-        if error_type == "other":
-            q_type, _ = GeminiClient._classify_error(exc)
-            if q_type != "other":
-                error_type = q_type
-            else:
-                error_type, _ = classify_llm_error(exc)
-                if error_type == "other":
-                    # classify_llm_error returns ("other","other"); keep "other".
-                    error_type = "other"
-    except Exception:
+    # Use the unified classifier for Gemini errors
+    error_type, _ = GeminiLLMClient._classify_error(exc)
+    if error_type == "other":
+        # Fall back to the unified classifier for cross-provider messages
         error_type, _ = classify_llm_error(exc)
 
     if error_type == "quota":

@@ -1,4 +1,5 @@
 """Teacher LLM error-handling tests: quota->503, HeyGen never 500, no quota masking."""
+import pytest
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -41,19 +42,19 @@ def test_teacher_ask_returns_503_on_llm_quota_error() -> None:
     assert response.status_code == 503
     body = response.json()
     assert "quota" in body["detail"].lower()
-    assert "OMNI_API_KEY" not in body["detail"]
+    # Verify no secrets are exposed
+    assert "API_KEY" not in body["detail"]
     assert "Bearer" not in body["detail"]
 
 
-def test_teacher_ask_returns_503_on_omni_402_insufficient_balance() -> None:
-    """The real Omni 402 insufficient_balance body must classify as quota -> 503."""
+def test_teacher_ask_returns_503_on_rate_limit() -> None:
+    """Rate limit errors should classify as quota -> 503."""
     with (
         patch("app.api.teacher.RAGRetriever.retrieve", return_value=[]),
         patch("app.lesson.teacher.get_llm_client") as mock_get_llm,
     ):
         mock_get_llm.return_value.generate_response.side_effect = RuntimeError(
-            "Omni API HTTP 402: "
-            '{"error": {"message": "Insufficient wallet balance.", "code": "insufficient_balance"}}'
+            "429 Rate limit exceeded"
         )
         response = client.post("/teacher/ask", json={"question": "What is artificial intelligence?"})
 
@@ -106,23 +107,41 @@ def test_teacher_ask_heygen_failure_never_turns_success_into_500() -> None:
     assert payload["video"]["status"] == "failed"
 
 
-def test_unified_does_not_fall_back_to_gemini_on_quota() -> None:
-    """Omni quota errors must propagate directly, never hidden behind a Gemini fallback."""
-    from app.llm import unified
+def test_key_rotation_on_quota_error() -> None:
+    """Quota errors trigger key rotation in the key manager."""
+    from app.llm.key_manager import GeminiKeyError, reset_key_manager
 
-    with (
-        patch("app.llm.unified.is_omni_configured", return_value=True),
-        patch("app.llm.unified.is_gemini_configured", return_value=True),
-        patch("app.llm.omni_client.OmniClient") as mock_omni_cls,
-        patch("app.llm.client.GeminiClient") as mock_gemini_cls,
-    ):
-        mock_omni_cls.return_value.generate_response.side_effect = RuntimeError(
-            "LLM quota has been exhausted. Please try again later."
-        )
-        try:
-            unified.generate_response("hello")
-        except RuntimeError as exc:
-            assert "quota" in str(exc).lower()
-        else:
-            raise AssertionError("expected quota RuntimeError")
-        mock_gemini_cls.assert_not_called()
+    # This test verifies that the key manager is properly handling quota errors
+    # by raising GeminiKeyError when all keys are exhausted
+    with patch("app.llm.key_manager.genai.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        # Both keys fail with quota
+        mock_client.models.generate_content.side_effect = [
+            RuntimeError("429 Quota exceeded"),
+            RuntimeError("429 Quota exceeded"),
+        ]
+        mock_client_cls.return_value = mock_client
+
+        from app.llm.key_manager import GeminiKeyManager
+
+        # Create manager with mocked keys
+        manager = GeminiKeyManager()
+        manager._keys = ["key-1", "key-2"]
+
+        with pytest.raises(GeminiKeyError, match="All configured Gemini API keys are currently unavailable"):
+            manager.generate_with_rotation("Test prompt")
+
+        # Should have tried both keys
+        assert mock_client.models.generate_content.call_count == 2
+
+
+def test_quota_errors_raise_not_masked() -> None:
+    """Quota errors must propagate directly, never hidden."""
+    from app.llm.unified import classify_llm_error
+
+    # Test that quota errors are properly classified
+    error_type, _ = classify_llm_error(RuntimeError("429 Quota exceeded"))
+    assert error_type == "quota"
+
+    error_type, _ = classify_llm_error(RuntimeError("RESOURCE_EXHAUSTED"))
+    assert error_type == "quota"

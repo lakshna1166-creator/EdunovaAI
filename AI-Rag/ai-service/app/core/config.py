@@ -4,44 +4,29 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Central configuration source. Loaded once here so every module can do:
-#   from app.core.config import OMNI_API_KEY, SUPABASE_URL, ...
+#   from app.core.config import GEMINI_API_KEYS, SUPABASE_URL, ...
 # regardless of the process working directory (uvicorn or pytest).
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-# --- Omni (primary LLM, OpenAI-compatible Chat Completions) ---
-# Single source of truth names — do NOT rename these.
-OMNI_API_KEY = os.getenv("OMNI_API_KEY", "")
-OMNI_API_URL = os.getenv("OMNI_API_URL", "").rstrip("/")
-# Model id sent in the `model` field (must be an exact id from the provider catalog).
-# Override via OMNI_MODEL without changing code. Defaults to a widely available model.
-OMNI_MODEL = os.getenv("OMNI_MODEL", "gpt-4o-mini")
-OMNI_TIMEOUT_SECONDS = float(os.getenv("OMNI_TIMEOUT_SECONDS", "60"))
-OMNI_MAX_RETRIES = int(os.getenv("OMNI_MAX_RETRIES", "1"))
-OMNI_RETRY_DELAY_SECONDS = float(os.getenv("OMNI_RETRY_DELAY_SECONDS", "2.0"))
+# --- Gemini (primary LLM with 7-key rotation) ---
+# Load all configured Gemini keys (1-7). Empty/missing keys are ignored.
+# Key rotation happens transparently inside the centralized Gemini key manager.
+GEMINI_API_KEYS = []
+for i in range(1, 8):
+    key = os.getenv(f"GEMINI_API_KEY_{i}", "").strip()
+    if key:
+        GEMINI_API_KEYS.append(key)
 
-# --- Supabase (RAG vector store) ---
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-
-# --- Gemini (preserved fallback / legacy LLM) ---
-# Kept for backward compatibility. Omni is now the primary LLM; Gemini is used
-# only as a fallback when configured, and never exposed to the frontend.
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-
-# --- HeyGen (optional video generation, backend-only) ---
-HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY", "")
-
-# Gemini teacher-generation model configuration.
-# Primary model first; fallbacks tried only when the primary returns 503 UNAVAILABLE.
-# 429 RESOURCE_EXHAUSTED is treated as quota exhaustion (no retry, no fallback).
-# Override the primary model via the GEMINI_MODEL env variable if needed.
-DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+# Gemini model configuration.
+# Use gemini-3.6-flash as the primary model (widely available, good performance).
+# Override via GEMINI_MODEL env variable if needed.
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Fallback chain used only after the primary model returns 503 UNAVAILABLE.
 # Order matters: the first model in the list is tried first.
 GEMINI_FALLBACK_MODELS = [
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
 ]
 
 # Maximum number of attempts per model when handling 503 UNAVAILABLE responses.
@@ -50,6 +35,13 @@ GEMINI_MAX_RETRIES_PER_MODEL = int(os.getenv("GEMINI_MAX_RETRIES_PER_MODEL", "1"
 
 # Delay between retry attempts (seconds).
 GEMINI_RETRY_DELAY_SECONDS = float(os.getenv("GEMINI_RETRY_DELAY_SECONDS", "2.0"))
+
+# --- Supabase (RAG vector store) ---
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+
+# --- HeyGen (optional video generation, backend-only) ---
+HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY", "")
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 UPLOAD_DIR = BASE_DIR / "data" / "uploads"
@@ -72,19 +64,14 @@ RAG_SIMILARITY_THRESHOLD = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.75"))
 # Safe environment validation helpers (never print secret values)
 # ---------------------------------------------------------------------------
 
-def is_omni_configured() -> bool:
-    """Return True when both OMNI_API_KEY and OMNI_API_URL are set."""
-    return bool(OMNI_API_KEY.strip()) and bool(OMNI_API_URL.strip())
-
-
 def is_supabase_configured() -> bool:
     """Return True when both SUPABASE_URL and SUPABASE_KEY are set."""
     return bool(SUPABASE_URL.strip()) and bool(SUPABASE_KEY.strip())
 
 
 def is_gemini_configured() -> bool:
-    """Return True when GEMINI_API_KEY is set (optional fallback LLM)."""
-    return bool(GEMINI_API_KEY.strip())
+    """Return True when at least one Gemini API key is configured."""
+    return len(GEMINI_API_KEYS) > 0
 
 
 def is_heygen_configured() -> bool:
@@ -98,9 +85,7 @@ def require_supabase() -> None:
         raise ValueError("SUPABASE_URL and SUPABASE_KEY must be configured in the .env file.")
 
 
-def require_omni() -> None:
-    """Raise a safe error when Omni is not configured (no values exposed)."""
-    if not OMNI_API_KEY.strip():
-        raise ValueError("OMNI_API_KEY is not configured")
-    if not OMNI_API_URL.strip():
-        raise ValueError("OMNI_API_URL is not configured")
+def require_gemini() -> None:
+    """Raise a safe error when no Gemini API key is configured (no values exposed)."""
+    if not is_gemini_configured():
+        raise ValueError("At least one GEMINI_API_KEY must be configured in the .env file.")

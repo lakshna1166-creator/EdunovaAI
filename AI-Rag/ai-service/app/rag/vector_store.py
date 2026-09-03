@@ -144,7 +144,16 @@ class SupabaseVectorStore:
                     for row in rows
                 ]
         except Exception as rpc_exc:
-            logger.error("[VECTOR_STORE] RPC match_document_chunks failed: %s", rpc_exc)
+            # Safe diagnostics only: error type + message + dims. Never log
+            # API keys, tokens, or full request bodies. Full traceback helps
+            # operators distinguish RPC failures from embedding failures.
+            logger.exception(
+                "[VECTOR_STORE] RPC match_document_chunks failed | query_dim=%d | match_count=%d | error_type=%s | error=%s",
+                len(query_vector),
+                top_k,
+                type(rpc_exc).__name__,
+                rpc_exc,
+            )
             error_str = str(rpc_exc)
             if "PGRST205" in error_str or "Could not find the table" in error_str:
                 raise RuntimeError(

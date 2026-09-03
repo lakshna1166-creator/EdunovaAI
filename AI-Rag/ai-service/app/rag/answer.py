@@ -311,7 +311,7 @@ def get_cached_rag_service() -> GroundedRAGService:
     """Get or create the cached RAG service singleton.
     
     This function ensures the SentenceTransformer model, Supabase client,
-    and primary LLM client (Omni preferred, Gemini fallback) are only
+    and centralized Gemini client (7-key rotation) are only
     initialized once and reused across requests.
     The cached service uses RAG_SIMILARITY_THRESHOLD so that irrelevant
     chunks do NOT silently trigger the RAG path.
@@ -349,8 +349,8 @@ def answer_question(
     """Convenience function for dual-mode answer generation.
 
     When relevant PDF chunks are found (above the similarity threshold), the
-    RAG pipeline is used. When no relevant chunks are found, the primary LLM
-    (Omni preferred, Gemini fallback) generates a general-knowledge answer
+    RAG pipeline is used. When no relevant chunks are found, Gemini
+    (centralized 7-key rotation) generates a general-knowledge answer
     instead of returning an error.
     """
     # Use cached service unless custom components are explicitly provided

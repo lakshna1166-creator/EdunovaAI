@@ -1,20 +1,15 @@
+"""Gemini LLM client using centralized key rotation.
+
+This module provides the GeminiClient interface for backward compatibility
+with existing code. All generation goes through the centralized key manager
+which handles automatic key rotation on quota/rate limit errors.
+"""
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
-from google import genai
-
-from app.core.config import (
-    GEMINI_API_KEY,
-    GEMINI_MAX_RETRIES_PER_MODEL,
-    GEMINI_FALLBACK_MODELS,
-    GEMINI_RETRY_DELAY_SECONDS,
-    DEFAULT_GEMINI_MODEL,
-)
-
-
+from app.llm.key_manager import get_key_manager
 
 # Suppress the harmless AFC warning that the google_genai SDK emits for
 # Models.generate_content() (it always recommends Chat.send_message instead).
@@ -23,14 +18,16 @@ logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 
 
 class GeminiClient:
-    """Reusable Gemini API client for the AI Teacher service.
+    """Gemini API client with centralized key rotation.
+
+    This client wraps the centralized GeminiKeyManager and provides the same
+    interface as before for backward compatibility with existing code.
 
     Features:
-    - Bounded retry (max 1 attempt per model) for 503 UNAVAILABLE only.
-    - Automatic fallback to next model when the current one is unavailable.
-    - 429 RESOURCE_EXHAUSTED triggers a clear quota-exceeded message (no retry).
+    - Automatic key rotation on quota/rate limit errors (up to 7 keys).
+    - Bounded retry (max 1 attempt per key) for 503 UNAVAILABLE only.
+    - 429 RESOURCE_EXHAUSTED triggers immediate key rotation (no retry).
     - All other errors are propagated with their original message.
-    - Teacher generation uses plain text prompts with no tools or AFC config.
     """
 
     def __init__(
@@ -39,52 +36,27 @@ class GeminiClient:
         model: str | None = None,
         client: Any | None = None,
     ) -> None:
-        self.api_key = api_key or GEMINI_API_KEY
+        """Initialize the Gemini client.
+
+        Args:
+            api_key: Ignored (kept for backward compatibility).
+                     Keys are loaded from environment via the key manager.
+            model: Optional model override. Defaults to gemini-2.0-flash.
+            client: Ignored (kept for backward compatibility).
+        """
+        from app.core.config import DEFAULT_GEMINI_MODEL
+
         self.model_name = model or DEFAULT_GEMINI_MODEL
         self._client = client
 
-        if not self.api_key:
+        # Verify at least one key is configured
+        from app.core.config import is_gemini_configured
+
+        if not is_gemini_configured():
             raise ValueError(
-                "GEMINI_API_KEY is missing. Add it to the .env file before using Gemini features."
+                "No Gemini API keys configured. "
+                "Set GEMINI_API_KEY_1 (and optionally GEMINI_API_KEY_2 through GEMINI_API_KEY_7) in .env"
             )
-
-    @property
-    def client(self) -> Any:
-        if self._client is None:
-            self._client = genai.Client(api_key=self.api_key)
-        return self._client
-
-    @staticmethod
-    def _extract_text(response: Any) -> str:
-        """Extract plain text from a Gemini response object."""
-        text = getattr(response, "text", None)
-        if isinstance(text, str) and text.strip():
-            return text
-
-        candidates = getattr(response, "candidates", None) or []
-        for candidate in candidates:
-            content = getattr(candidate, "content", None)
-            parts = getattr(content, "parts", None) or []
-            rendered_parts: list[str] = []
-            for part in parts:
-                part_text = getattr(part, "text", None)
-                if isinstance(part_text, str):
-                    rendered_parts.append(part_text)
-            if rendered_parts:
-                return "".join(rendered_parts)
-
-        payload = getattr(response, "to_dict", None)
-        if callable(payload):
-            try:
-                as_dict = payload()
-                if isinstance(as_dict, dict):
-                    nested = as_dict.get("text") or as_dict.get("output_text")
-                    if isinstance(nested, str):
-                        return nested
-            except Exception:
-                pass
-
-        return ""
 
     @staticmethod
     def _classify_error(exc: Exception) -> tuple[str, str]:
@@ -94,88 +66,65 @@ class GeminiClient:
             A (error_type, user_message) tuple.
             error_type is one of: "quota", "unavailable", "other".
         """
-        msg = str(exc)
+        msg = str(exc).lower()
 
-        if any(keyword in msg for keyword in ("429", "RESOURCE_EXHAUSTED", "quota")):
-            return ("quota", "Gemini API quota has been exhausted. Please try again later.")
-        if any(keyword in msg for keyword in ("503", "UNAVAILABLE", "unavailable", "high demand")):
-            return ("unavailable", "Gemini is temporarily unavailable. Please try again shortly.")
-        return ("other", f"Gemini API request failed: {msg}")
-
-    def _call_with_model(self, model: str, prompt: str) -> str:
-        """Make a single generate_content call with the given model.
-
-        Raises:
-            RuntimeError: on any API error.
-        """
-        try:
-            response = self.client.models.generate_content(
-                model=model,
-                contents=prompt,
+        if any(
+            keyword in msg
+            for keyword in (
+                "429",
+                "resource_exhausted",
+                "quota",
+                "rate_limit",
+                "rate limit",
+                "exhausted",
             )
-            text = self._extract_text(response)
-            if not text:
-                raise ValueError("Gemini returned an empty response.")
-            return text
-        except Exception as exc:  # Re-raise as RuntimeError with a clean message.
-            raise RuntimeError(str(exc)) from exc
+        ):
+            return ("quota", "Gemini API quota has been exhausted. Please try again later.")
+
+        if any(
+            keyword in msg
+            for keyword in ("503", "unavailable", "overloaded", "high demand")
+        ):
+            return ("unavailable", "Gemini is temporarily unavailable. Please try again shortly.")
+
+        return ("other", f"Gemini API request failed: {exc}")
 
     def generate_response(self, prompt: str) -> str:
-        """Generate a plain-text response from Gemini with bounded retry and fallback.
+        """Generate a plain-text response from Gemini with automatic key rotation.
 
-        Retry/fallback strategy:
-          - Only 503 UNAVAILABLE triggers retry (max GEMINI_MAX_RETRIES_PER_MODEL attempts).
-          - After exhausting retries on a model, fall back to the next model in the chain.
-          - 429 RESOURCE_EXHAUSTED is treated as quota exhaustion — no retry, no fallback.
-          - Other errors propagate immediately with their original message.
+        This method uses the centralized key manager which:
+        1. Tries the current key first.
+        2. On quota/rate limit errors, rotates to the next key.
+        3. Continues until a key succeeds or all keys are exhausted.
+
+        Returns:
+            Generated text from Gemini.
+
+        Raises:
+            RuntimeError: When all keys are exhausted or on non-recoverable errors.
         """
-        # Build the ordered model chain: primary first, then fallbacks.
-        all_models = [self.model_name] + [
-            m for m in GEMINI_FALLBACK_MODELS if m != self.model_name
-        ]
+        from app.llm.key_manager import GeminiKeyError
 
-        last_exc: Exception | None = None
+        key_manager = get_key_manager()
 
-        for model in all_models:
-            # Number of attempts for this specific model.
-            for attempt in range(1, GEMINI_MAX_RETRIES_PER_MODEL + 1):
-                try:
-                    return self._call_with_model(model, prompt)
-                except RuntimeError as exc:
-                    error_type, _ = self._classify_error(exc)
-                    last_exc = exc
-
-                    if error_type == "quota":
-                        # Quota exhaustion — stop immediately, do not retry or fall back.
-                        raise RuntimeError(
-                            "Gemini API quota has been exhausted. Please try again later."
-                        ) from last_exc
-
-                    if error_type == "unavailable":
-                        # Only retry if we have attempts left for this model.
-                        if attempt < GEMINI_MAX_RETRIES_PER_MODEL:
-                            time.sleep(GEMINI_RETRY_DELAY_SECONDS)
-                            continue  # Retry the same model.
-                        # Exhausted retries for this model — fall through to next model.
-                    else:
-                        # Unknown / unexpected error — propagate immediately.
-                        raise RuntimeError(
-                            f"Gemini API request failed: {exc}"
-                        ) from exc
-
-            # After exhausting retries on this model, try the next one in the chain.
-            # (only reached when error_type == "unavailable")
-
-        # All models exhausted.
-        raise RuntimeError(
-            "Gemini is temporarily unavailable. Please try again shortly."
-        ) from last_exc
+        try:
+            return key_manager.generate_with_rotation(
+                prompt=prompt,
+                model=self.model_name,
+            )
+        except GeminiKeyError:
+            # All keys exhausted - re-raise as RuntimeError for backward compatibility
+            raise RuntimeError(
+                "All configured Gemini API keys are currently unavailable due to quota/rate limits. "
+                "Please try again later."
+            )
 
 
 def get_gemini_client() -> GeminiClient:
+    """Return a new GeminiClient instance (backward compatibility function)."""
     return GeminiClient()
 
 
 def generate_response(prompt: str) -> str:
-    """Convenience function used by the project for all Gemini calls."""
+    """Convenience function using the default GeminiClient."""
     return get_gemini_client().generate_response(prompt)

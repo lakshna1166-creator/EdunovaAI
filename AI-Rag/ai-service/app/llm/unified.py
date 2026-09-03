@@ -1,85 +1,136 @@
-"""Unified LLM routing: Omni (primary) with Gemini (fallback).
+"""Unified LLM routing: Gemini with 7-key rotation.
 
-Preserves the existing ``GeminiClient`` untouched while routing all RAG /
-Teacher flows through Omni when ``OMNI_API_KEY`` + ``OMNI_API_URL`` are set.
+This module provides a single entry point for all LLM generation in the application.
+All LLM calls go through the centralized Gemini key manager with automatic key rotation.
 
-Interface: ``generate_response(prompt) -> str`` — identical for both clients.
+Interface: ``generate_response(prompt) -> str``
 """
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from app.core.config import is_gemini_configured, is_omni_configured
+from app.core.config import is_gemini_configured
 
 logger = logging.getLogger(__name__)
 
 
-def get_llm_client() -> Any:
-    """Return the primary LLM client.
+def get_llm_client() -> "GeminiLLMClient":
+    """Return the unified LLM client (Gemini with key rotation).
 
-    - Omni when configured (preferred).
-    - Gemini when Omni is missing but GEMINI_API_KEY is set (legacy fallback).
-    - Raises a safe ValueError when neither is configured (no secrets exposed).
+    Raises:
+        ValueError: When no Gemini API key is configured (no secrets exposed).
     """
-    if is_omni_configured():
-        from app.llm.omni_client import OmniClient
+    if not is_gemini_configured():
+        raise ValueError(
+            "No Gemini API keys configured. "
+            "Set GEMINI_API_KEY_1 (and optionally GEMINI_API_KEY_2 through GEMINI_API_KEY_7) in .env"
+        )
 
-        return OmniClient()
-    if is_gemini_configured():
-        from app.llm.client import GeminiClient
+    from app.llm.unified import GeminiLLMClient
 
-        return GeminiClient()
-    raise ValueError(
-        "OMNI_API_KEY is not configured. Add OMNI_API_KEY and OMNI_API_URL to the .env file."
-    )
+    return GeminiLLMClient()
 
 
 def generate_response(prompt: str) -> str:
-    """Generate via Omni, falling back to Gemini when Omni fails and Gemini is configured.
+    """Generate text using Gemini with 7-key rotation.
 
-    Quota exhaustion is never masked by the fallback: when Omni reports
-    quota/insufficient-balance, the error propagates immediately so the
-    actual provider responsible stays visible (mirrors GeminiClient, which
-    never retries or falls back on 429).
+    This is the main entry point for all LLM generation in the application.
+    It uses the centralized key manager to handle quota/rate limits transparently.
+
+    Args:
+        prompt: The text prompt to send to Gemini.
+
+    Returns:
+        Generated text from Gemini.
+
+    Raises:
+        GeminiKeyError: When all configured keys are exhausted.
+        RuntimeError: On non-quota errors (e.g., malformed requests).
     """
-    if is_omni_configured():
-        from app.llm.omni_client import OmniClient
+    if not is_gemini_configured():
+        raise ValueError(
+            "No Gemini API keys configured. "
+            "Set GEMINI_API_KEY_1 (and optionally GEMINI_API_KEY_2 through GEMINI_API_KEY_7) in .env"
+        )
 
-        try:
-            return OmniClient().generate_response(prompt)
-        except Exception as exc:
-            # Classify with the shared classifier (not the client class itself,
-            # which keeps this testable and provider-agnostic). Quota —
-            # including Omni HTTP 402 insufficient_balance — is never masked
-            # by the Gemini fallback.
-            error_type, _ = classify_llm_error(exc)
-            if error_type == "quota":
-                raise
-            if is_gemini_configured():
-                logger.warning("[LLM] Omni failed, falling back to Gemini: %s", exc)
-                from app.llm.client import GeminiClient
-
-                return GeminiClient().generate_response(prompt)
-            raise
-    if is_gemini_configured():
-        from app.llm.client import GeminiClient
-
-        return GeminiClient().generate_response(prompt)
-    raise ValueError(
-        "OMNI_API_KEY is not configured. Add OMNI_API_KEY and OMNI_API_URL to the .env file."
-    )
+    return GeminiLLMClient().generate_response(prompt)
 
 
 def classify_llm_error(exc: Exception) -> tuple[str, str]:
-    """Classify errors from either provider into quota/unavailable/other."""
-    msg = str(exc)
-    if any(k in msg for k in ("429", "402", "RESOURCE_EXHAUSTED", "quota", "Quota",
-                              "rate_limit", "RATE_LIMIT", "insufficient",
-                              "insufficient_balance", "billing")):
+    """Classify errors into quota/unavailable/other for HTTP response mapping."""
+    msg = str(exc).lower()
+
+    # Quota/rate limit errors
+    if any(
+        k in msg
+        for k in (
+            "429",
+            "resource_exhausted",
+            "quota",
+            "rate_limit",
+            "rate limit",
+            "insufficient",
+            "billing",
+            "exhausted",
+        )
+    ):
         return ("quota", "quota")
-    if any(k in msg for k in ("503", "502", "529", "UNAVAILABLE", "unavailable",
-                              "overloaded", "high demand", "temporarily unavailable",
-                              "timeout", "Timeout")):
+
+    # Service unavailable errors
+    if any(
+        k in msg
+        for k in (
+            "503",
+            "502",
+            "529",
+            "unavailable",
+            "overloaded",
+            "high demand",
+            "temporarily unavailable",
+        )
+    ):
         return ("unavailable", "unavailable")
+
     return ("other", "other")
+
+
+class GeminiLLMClient:
+    """Unified LLM client using Gemini with 7-key rotation.
+
+    This client wraps the centralized key manager and provides the single
+    unified LLM interface used across the application.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the unified LLM client."""
+        from app.llm.key_manager import get_key_manager
+
+        self._key_manager = get_key_manager()
+
+    def generate_response(self, prompt: str) -> str:
+        """Generate text using Gemini with automatic key rotation.
+
+        Args:
+            prompt: The text prompt to send to Gemini.
+
+        Returns:
+            Generated text from Gemini.
+
+        Raises:
+            GeminiKeyError: When all configured keys are exhausted.
+            RuntimeError: On non-quota errors.
+        """
+        return self._key_manager.generate_with_rotation(prompt)
+
+    @staticmethod
+    def _classify_error(exc: Exception) -> tuple[str, str]:
+        """Classify an exception for HTTP response mapping.
+
+        Args:
+            exc: The exception to classify.
+
+        Returns:
+            A tuple of (error_type, user_message).
+            error_type is one of: "quota", "unavailable", "other".
+        """
+        return classify_llm_error(exc)

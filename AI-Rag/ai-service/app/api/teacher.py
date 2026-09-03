@@ -7,9 +7,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.lesson.teacher import AITeacherService
-from app.llm.client import GeminiClient
-from app.llm.omni_client import OmniClient
-from app.llm.unified import classify_llm_error
+from app.llm.unified import GeminiLLMClient, classify_llm_error
 from app.rag.retriever import RAGRetriever
 from app.services.heygen import generate_teacher_video, is_configured
 
@@ -19,7 +17,7 @@ router = APIRouter(prefix="/teacher", tags=["teacher"])
 
 ALLOWED_LEVELS = {"beginner", "intermediate", "advanced"}
 
-# Public-facing messages for upstream LLM failures (mirrors /chat).
+# Public-facing messages for upstream LLM failures.
 # These intentionally avoid exposing internals (keys, SDK details, raw bodies).
 TEACHER_QUOTA_ERROR_MESSAGE = (
     "AI teacher service is temporarily unavailable because the LLM "
@@ -36,21 +34,13 @@ TEACHER_INTERNAL_ERROR_MESSAGE = (
 def _classify_generation_error(exc: Exception) -> str:
     """Classify an LLM generation failure as quota/unavailable/other.
 
-    Uses each provider's own classifier first (covers provider-specific
-    keywords such as Omni HTTP 402 insufficient_balance), then the unified
-    classifier for cross-provider messages. Never exposes secrets.
+    Uses the unified classifier for Gemini errors. Never exposes secrets.
     """
-    try:
-        error_type, _ = OmniClient._classify_error(exc)
-        if error_type != "other":
-            return error_type
-        gemini_type, _ = GeminiClient._classify_error(exc)
-        if gemini_type != "other":
-            return gemini_type
-        unified_type, _ = classify_llm_error(exc)
-        return unified_type
-    except Exception:
-        return "other"
+    error_type, _ = GeminiLLMClient._classify_error(exc)
+    if error_type != "other":
+        return error_type
+    unified_type, _ = classify_llm_error(exc)
+    return unified_type
 
 
 def _generation_http_exception(exc: Exception) -> HTTPException:
