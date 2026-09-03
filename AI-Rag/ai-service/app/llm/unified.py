@@ -26,8 +26,6 @@ def get_llm_client() -> "GeminiLLMClient":
             "Set GEMINI_API_KEY_1 (and optionally GEMINI_API_KEY_2 through GEMINI_API_KEY_7) in .env"
         )
 
-    from app.llm.unified import GeminiLLMClient
-
     return GeminiLLMClient()
 
 
