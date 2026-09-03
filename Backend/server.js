@@ -191,7 +191,7 @@ app.listen(PORT, () => {
   if (!process.env.JWT_SECRET) {
     console.error("⚠️  CRITICAL WARNING: JWT_SECRET is missing from .env!");
   }
-  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) {
+  if (!process.env.SUPABASE_URL || !(process.env.SUPABASE_KEY || process.env.SUPABASE_SECRET_KEY)) {
     console.error("⚠️  CRITICAL WARNING: Supabase credentials missing from .env!");
   }
 });
