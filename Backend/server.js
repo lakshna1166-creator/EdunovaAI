@@ -47,13 +47,14 @@ const isProduction = process.env.NODE_ENV === "production";
 
 const configuredFrontendUrls = process.env.FRONTEND_URL
   ? process.env.FRONTEND_URL
-      .split(",")
-      .map((url) => url.trim().replace(/\/$/, ""))
-      .filter(Boolean)
+    .split(",")
+    .map((url) => url.trim().replace(/\/$/, ""))
+    .filter(Boolean)
   : [];
 
 const defaultOrigins = [
   "http://localhost:5173",
+  "http://localhost:5174",
   "http://localhost:3000",
   "https://edunovaai.onrender.com"
 ];
