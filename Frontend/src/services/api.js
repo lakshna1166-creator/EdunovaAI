@@ -3,7 +3,7 @@
  * Handles HTTP requests, JWT authorization headers, session persistence, and student data isolation
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://edunovaai-1-eov2.onrender.com/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://edunovaai-2.onrender.com/docs';
 
 /**
  * Get stored JWT token
