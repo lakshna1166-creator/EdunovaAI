@@ -1,44 +1,64 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import time
 from typing import Any, Sequence
 from unittest.mock import MagicMock, Mock, NonCallableMagicMock, NonCallableMock
 
 from sentence_transformers import SentenceTransformer
 
+# Thread-safe model cache with lock for singleton pattern
 _MODEL_CACHE: dict[str, Any] = {}
+_CACHE_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 
 
 def get_sentence_transformer(
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
 ) -> Any:
-    """Load or return the cached SentenceTransformer model once per process."""
+    """Load or return the cached SentenceTransformer model once per process.
+    
+    Uses CPU device explicitly to avoid loading GPU/CUDA kernels.
+    Thread-safe singleton pattern ensures model is loaded only once.
+    """
     # If SentenceTransformer has been patched with a Mock (e.g. in unit tests), return mock call directly
     if isinstance(SentenceTransformer, (Mock, MagicMock, NonCallableMock, NonCallableMagicMock)):
         return SentenceTransformer(model_name)
 
+    # Thread-safe check and load
     if model_name not in _MODEL_CACHE:
-        logger.info("[PERF] Loading SentenceTransformer model '%s'...", model_name)
-        load_start = time.perf_counter()
-        try:
-            _MODEL_CACHE[model_name] = SentenceTransformer(model_name, local_files_only=True)
-            logger.info(
-                "[EMBEDDINGS] Model '%s' loaded from local cache (local_files_only=True).",
-                model_name,
-            )
-        except Exception as local_exc:
-            # Safe diagnostics only: exception type + message, never secrets/paths with keys.
-            logger.warning(
-                "[EMBEDDINGS] Local-only load failed for '%s' (%s: %s). Trying remote download...",
-                model_name,
-                type(local_exc).__name__,
-                local_exc,
-            )
-            _MODEL_CACHE[model_name] = SentenceTransformer(model_name)
-        load_time = time.perf_counter() - load_start
-        logger.info("[PERF] SentenceTransformer loaded in %.2fs", load_time)
+        with _CACHE_LOCK:
+            # Double-check after acquiring lock
+            if model_name not in _MODEL_CACHE:
+                logger.info("[PERF] Loading SentenceTransformer model '%s' (CPU only)...", model_name)
+                load_start = time.perf_counter()
+                try:
+                    # Explicitly use CPU device to avoid loading CUDA kernels
+                    _MODEL_CACHE[model_name] = SentenceTransformer(
+                        model_name,
+                        device="cpu",
+                        local_files_only=True,
+                    )
+                    logger.info(
+                        "[EMBEDDINGS] Model '%s' loaded from local cache (CPU, local_files_only=True).",
+                        model_name,
+                    )
+                except Exception as local_exc:
+                    # Safe diagnostics only: exception type + message, never secrets/paths with keys.
+                    logger.warning(
+                        "[EMBEDDINGS] Local-only load failed for '%s' (%s: %s). Trying remote download (CPU only)...",
+                        model_name,
+                        type(local_exc).__name__,
+                        local_exc,
+                    )
+                    _MODEL_CACHE[model_name] = SentenceTransformer(
+                        model_name,
+                        device="cpu",
+                    )
+                load_time = time.perf_counter() - load_start
+                logger.info("[PERF] SentenceTransformer loaded in %.2fs", load_time)
     else:
         logger.debug("[EMBEDDINGS] Reusing cached SentenceTransformer model '%s'.", model_name)
     return _MODEL_CACHE[model_name]
@@ -192,8 +212,23 @@ class GeminiEmbeddingProvider:
             raise RuntimeError(f"Batch embedding generation failed: {exc}") from exc
 
 
+# Module-level singleton for embedding provider
+_EMBEDDING_PROVIDER_INSTANCE: GeminiEmbeddingProvider | None = None
+_PROVIDER_LOCK = threading.Lock()
+
+
 def get_embedding_provider() -> GeminiEmbeddingProvider:
-    return GeminiEmbeddingProvider()
+    """Get or create the singleton embedding provider instance.
+    
+    This ensures the embedding provider (and its SentenceTransformer model)
+    is only instantiated once per application process.
+    """
+    global _EMBEDDING_PROVIDER_INSTANCE
+    if _EMBEDDING_PROVIDER_INSTANCE is None:
+        with _PROVIDER_LOCK:
+            if _EMBEDDING_PROVIDER_INSTANCE is None:
+                _EMBEDDING_PROVIDER_INSTANCE = GeminiEmbeddingProvider()
+    return _EMBEDDING_PROVIDER_INSTANCE
 
 
 def generate_embedding(text: str) -> list[float]:
