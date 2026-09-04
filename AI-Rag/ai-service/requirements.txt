@@ -94,6 +94,8 @@ realtime==2.31.0
 requests==2.34.2
 
 sentence-transformers==5.1.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0+cpu
 sniffio==1.3.1
 
 starlette==1.6.0
