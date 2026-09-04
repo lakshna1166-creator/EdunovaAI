@@ -133,7 +133,7 @@ class SupabaseVectorStore:
             rows = response.data or []
             logger.info("[VECTOR_STORE] RPC returned %d row(s)", len(rows))
             if rows is not None:
-                return [
+                results = [
                     {
                         "text": row.get("content") or row.get("text") or "",
                         "metadata": row.get("metadata") or {},
@@ -143,6 +143,16 @@ class SupabaseVectorStore:
                     }
                     for row in rows
                 ]
+                # Diagnostic logging: show similarity scores for each result
+                for idx, result in enumerate(results, start=1):
+                    logger.info(
+                        "[VECTOR_STORE] Result %d | score=%.4f | page=%s | source=%s",
+                        idx,
+                        result["score"],
+                        result["page"],
+                        result["source"],
+                    )
+                return results
         except Exception as rpc_exc:
             # Safe diagnostics only: error type + message + dims. Never log
             # API keys, tokens, or full request bodies. Full traceback helps
