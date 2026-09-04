@@ -25,6 +25,10 @@ ENV/
 .coverage
 htmlcov/
 
+# SentenceTransformer model files (committed to bake into Docker image on Render)
+models/*
+!models/.gitkeep
+
 # Data / Uploads
 data/uploads/*
 !data/uploads/.gitkeep

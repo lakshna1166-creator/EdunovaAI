@@ -1,0 +1,4 @@
+# Placeholder to preserve the models/ directory in Git.
+# The actual model files should be downloaded by scripts/download_model.py
+# during the Render build step and then committed to the repository so they
+# are baked into the Docker image.

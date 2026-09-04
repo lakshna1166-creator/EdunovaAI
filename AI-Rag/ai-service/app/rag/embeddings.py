@@ -4,10 +4,28 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Sequence
 from unittest.mock import MagicMock, Mock, NonCallableMagicMock, NonCallableMock
 
 from sentence_transformers import SentenceTransformer
+
+# ---------------------------------------------------------------------------
+# Local model cache configuration
+# ---------------------------------------------------------------------------
+# The SentenceTransformer model is pre-downloaded into the local 'models/'
+# directory during the Render build step (see scripts/download_model.py).
+# This directory is committed to the repository so it is baked into the
+# Docker image. At runtime, we load exclusively from this local path with
+# local_files_only=True to avoid the remote download that was causing OOM
+# on the 512 MiB Render free tier.
+
+# Resolve the local models directory relative to the project root.
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_LOCAL_MODELS_DIR = _PROJECT_ROOT / "models"
+
+# Set SENTENCE_TRANSFORMERS_HOME so huggingface_hub resolves the local cache.
+os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_LOCAL_MODELS_DIR / "huggingface"))
 
 # Thread-safe model cache with lock for singleton pattern
 _MODEL_CACHE: dict[str, Any] = {}
@@ -25,13 +43,17 @@ def get_sentence_transformer(
     Uses CPU device explicitly to avoid loading GPU/CUDA kernels.
     Thread-safe singleton pattern ensures model is loaded only once.
 
+    The model is pre-downloaded into the local 'models/' directory during
+    the Render build step (scripts/download_model.py) and baked into the
+    Docker image. At runtime, we ALWAYS load from that local path using
+    cache_dir pointing to the committed models/ directory.
+
     Args:
         model_name: HuggingFace model identifier.
-        allow_download: When False (default), only load from local cache.
-                        When True, allow remote download. Use True only at
-                        application startup (single thread, ample memory).
-                        Subsequent calls should pass False so the cached
-                        model is returned instantly.
+        allow_download: Deprecated. Kept for backward compatibility. Runtime
+                        always uses local_files_only=True from the baked-in
+                        models/ directory. Build-time downloads use
+                        scripts/download_model.py instead.
     """
     # If SentenceTransformer has been patched with a Mock (e.g. in unit tests), return mock call directly
     if isinstance(SentenceTransformer, (Mock, MagicMock, NonCallableMock, NonCallableMagicMock)):
@@ -42,53 +64,49 @@ def get_sentence_transformer(
         with _CACHE_LOCK:
             # Double-check after acquiring lock
             if model_name not in _MODEL_CACHE:
+                # The model is baked into models/ at build time.
+                # We ALWAYS load local-only at runtime for memory safety.
+                cache_dir = str(_LOCAL_MODELS_DIR / "huggingface")
+
                 logger.info(
-                    "[PERF] Loading SentenceTransformer model '%s' (CPU, allow_download=%s)...",
+                    "[PERF] Loading SentenceTransformer model '%s' (CPU, cache_dir='%s')...",
                     model_name,
-                    allow_download,
+                    cache_dir,
                 )
                 load_start = time.perf_counter()
                 try:
-                    # Explicitly use CPU device to avoid loading CUDA kernels
+                    # Explicitly use CPU device to avoid loading CUDA kernels.
+                    # local_files_only=True ensures we NEVER attempt a remote
+                    # download at runtime (which would OOM on Render 512 MiB).
                     _MODEL_CACHE[model_name] = SentenceTransformer(
                         model_name,
                         device="cpu",
-                        local_files_only=not allow_download,
+                        cache_dir=cache_dir,
+                        local_files_only=True,
                     )
                     logger.info(
-                        "[EMBEDDINGS] Model '%s' loaded (CPU, local_files_only=%s).",
+                        "[EMBEDDINGS] Model '%s' loaded (CPU, cache_dir='%s').",
                         model_name,
-                        not allow_download,
+                        cache_dir,
                     )
                 except Exception as local_exc:
-                    if not allow_download:
-                        # Already tried local-only; model is not in cache.
-                        # Raise immediately — we do NOT want to silently retry
-                        # inside a live request (causes OOM on Render).
-                        logger.error(
-                            "[EMBEDDINGS] Local-only load failed for '%s' "
-                            "(%s: %s). The model is not in the HuggingFace cache. "
-                            "Ensure the application pre-loads the model at startup "
-                            "(which downloads and caches it once).",
-                            model_name,
-                            type(local_exc).__name__,
-                            local_exc,
-                        )
-                        raise RuntimeError(
-                            f"Embedding model '{model_name}' is not cached and "
-                            "allow_download=False was passed. "
-                            "Ensure the model is pre-loaded at application startup."
-                        ) from local_exc
-                    # allow_download=True but still failed — something is wrong with network/disk
+                    # The model was not found in models/huggingface/.
+                    # This means the build step (scripts/download_model.py)
+                    # was not run or the model was not committed.
                     logger.error(
-                        "[EMBEDDINGS] Model download failed for '%s' (%s: %s). "
-                        "Giving up.",
+                        "[EMBEDDINGS] Model '%s' not found in local cache '%s'. "
+                        "Expected model files in models/huggingface/snapshots/. "
+                        "Run 'python scripts/download_model.py' during the Render "
+                        "build step to pre-download the model.",
                         model_name,
-                        type(local_exc).__name__,
-                        local_exc,
+                        cache_dir,
                     )
                     raise RuntimeError(
-                        f"Failed to load embedding model '{model_name}': {local_exc}"
+                        f"Embedding model '{model_name}' not found in "
+                        f"'{cache_dir}'. "
+                        "Ensure scripts/download_model.py is run during the "
+                        "Render build step to pre-download the model into "
+                        "the models/ directory."
                     ) from local_exc
                 load_time = time.perf_counter() - load_start
                 logger.info("[PERF] SentenceTransformer loaded in %.2fs", load_time)
@@ -281,38 +299,39 @@ def preload_embedding_model() -> GeminiEmbeddingProvider:
     handler in `app/main.py`. It:
 
     1. Creates the singleton provider (if not already created).
-    2. Forces the model to be loaded into memory on a single thread.
-    3. Permits a one-time remote download (the result is then cached on
-       disk for subsequent process restarts, assuming Render persists
-       the disk layer across deploys — see notes below).
+    2. Forces the model to be loaded from the local baked-in models/
+       directory into memory on a single thread.
 
-    If the model is already cached on disk, the call returns almost
-    immediately. If not, it downloads once, caches, and returns.
+    The model must have been pre-downloaded during the Render build step
+    using scripts/download_model.py and committed to the repository so
+    it is baked into the Docker image. This function ALWAYS loads from
+    the local path with local_files_only=True.
 
-    This guarantees that no `/teacher/ask` request ever has to download
-    the model under live request memory pressure (the original Render
-    512 MiB OOM cause).
+    This guarantees that:
+    - No remote download is attempted at runtime (which would OOM on
+      the 512 MiB Render free tier).
+    - No `/teacher/ask` request ever has to load the model under live
+      request memory pressure.
+    - We fail fast at startup with a clear error if the model is missing
+      (rather than OOM-ing on the first request).
     """
     global _EMBEDDING_PROVIDER_INSTANCE
-    # Make sure the singleton provider exists. We temporarily allow the
-    # download path so the startup pre-load can populate the local
-    # HuggingFace cache if it is empty.
     if _EMBEDDING_PROVIDER_INSTANCE is None:
         with _PROVIDER_LOCK:
             if _EMBEDDING_PROVIDER_INSTANCE is None:
+                # allow_download=False is always enforced at runtime;
+                # the model is loaded from the baked-in models/ directory.
                 _EMBEDDING_PROVIDER_INSTANCE = GeminiEmbeddingProvider(
-                    allow_download=True,
+                    allow_download=False,
                 )
     provider = _EMBEDDING_PROVIDER_INSTANCE
 
-    # Force eager load with download permission so the model is
-    # materialised in this process exactly once. After this returns,
-    # _MODEL_CACHE contains the singleton SentenceTransformer instance.
     logger.info(
-        "[EMBEDDINGS] Pre-loading model '%s' (startup, allow_download=True)",
+        "[EMBEDDINGS] Pre-loading model '%s' from local cache (models/)...",
         provider.model_name,
     )
-    get_sentence_transformer(provider.model_name, allow_download=True)
+    # Always local-only at runtime; the model was pre-downloaded at build time.
+    get_sentence_transformer(provider.model_name, allow_download=False)
 
     # Ensure the provider's own `_model` reference points at the same
     # cached object. After this, request handlers will NEVER trigger a
