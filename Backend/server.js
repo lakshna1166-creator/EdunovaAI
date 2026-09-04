@@ -60,10 +60,13 @@ const defaultOrigins = [
   "https://edunova-ai-delta.vercel.app"
 ];
 
-// Regex for Vercel preview/deployment URLs for the edunova-ai project.
-// Matches: https://edunova-ai-*.vercel.app
-// Captures: all current and future preview deployments, PR previews, etc.
-const VERCEL_PREVIEW_PATTERN = /^https:\/\/edunova-ai-[a-zA-Z0-9_-]+\.vercel\.app$/;
+// Regex for Vercel preview/deployment URLs for the EduNova project.
+// Matches two prefixes used by Vercel for this project:
+//   - edunova-ai-*   (e.g. edunova-ai-delta, edunova-ai-git-main-…)
+//   - edunova-*      (e.g. edunova-q9bcxdvnq-…)
+// Covers all current and future preview URLs without hardcoding them.
+const VERCEL_PREVIEW_PATTERN =
+  /^https:\/\/edunova(-ai)?-[a-zA-Z0-9_-]+\.vercel\.app$/;
 
 const allowedOrigins = [
   ...new Set([
@@ -87,9 +90,10 @@ const corsOptions = {
       return callback(null, true);
     }
 
-    // Allow any Vercel preview/deployment URL for the edunova-ai project.
-    // This covers both the stable production (edunova-ai-delta) and all
-    // future preview URLs (edunova-ai-*-*) without hardcoding them.
+    // Allow any Vercel preview/deployment URL for the EduNova project.
+    // Covers both the stable production (edunova-ai-delta) and all
+    // current/future preview URLs (edunova-ai-… and edunova-…) without
+    // hardcoding each one.
     if (VERCEL_PREVIEW_PATTERN.test(cleanOrigin)) {
       return callback(null, true);
     }
