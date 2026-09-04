@@ -94,15 +94,35 @@ export const socraticChat = async (req, res, next) => {
     });
 
   } catch (error) {
+    const errorMessage = error.message || "Unknown error";
+    const isTimeout = errorMessage.includes("timed out");
+    const isConnection = errorMessage.includes("Could not connect") || errorMessage.includes("ECONNREFUSED") || errorMessage.includes("fetch");
+    const isLocalhostProduction = errorMessage.includes("localhost") && errorMessage.includes("production");
+
     console.error(
       "AI-RAG connection error:",
-      error.message
+      errorMessage
     );
 
-    return res.status(502).json({
+    // Return a descriptive message so the browser/client knows why it failed.
+    let clientMessage = "AI-RAG service is unavailable.";
+    let statusCode = 502;
+
+    if (isTimeout) {
+      clientMessage = "AI-RAG service timed out. Please try again.";
+      statusCode = 504;
+    } else if (isConnection) {
+      clientMessage = "Could not reach the AI-RAG service. It may be offline.";
+      statusCode = 503;
+    } else if (isLocalhostProduction) {
+      clientMessage = "AI-RAG service URL is misconfigured (localhost used in production).";
+      statusCode = 502;
+    }
+
+    return res.status(statusCode).json({
       success: false,
-      message: "AI-RAG service is unavailable.",
-      error: error.message
+      message: clientMessage,
+      error: process.env.NODE_ENV === "production" ? "Service error" : errorMessage
     });
   }
 };

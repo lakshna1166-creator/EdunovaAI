@@ -1,9 +1,25 @@
 const RAG_SERVICE_URL =
     process.env.RAG_SERVICE_URL || process.env.AI_RAG_URL || "http://localhost:8000";
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+// One-time startup log so production logs make it obvious which AI-Rag URL is in use.
+console.log(
+    `[ragService] RAG_SERVICE_URL = ${RAG_SERVICE_URL} (env: ${process.env.NODE_ENV || "development"})`
+);
+
 export const askRAG = async ({ question, level = "beginner" }) => {
     if (!RAG_SERVICE_URL) {
         throw new Error("RAG_SERVICE_URL is not configured. Set it in Backend/.env");
+    }
+
+    // In production, refuse to call localhost because AI-Rag is deployed separately.
+    if (IS_PRODUCTION && /localhost|127\.0\.0\.1/i.test(RAG_SERVICE_URL)) {
+        throw new Error(
+            "RAG_SERVICE_URL is set to a localhost address in production. " +
+            "Set RAG_SERVICE_URL (or AI_RAG_URL) to the deployed AI-Rag service URL " +
+            "(e.g. https://<your-ai-rag>.onrender.com) in the Render environment."
+        );
     }
 
     const controller = new AbortController();
