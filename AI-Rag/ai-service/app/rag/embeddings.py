@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any, Sequence
 from unittest.mock import MagicMock, Mock, NonCallableMagicMock, NonCallableMock
 
-from sentence_transformers import SentenceTransformer
+# Lazily initialised when get_sentence_transformer() is first called.
+# See get_sentence_transformer() for rationale.
+# IMPORTANT: Keep this module-level binding so that tests can still patch
+# `app.rag.embeddings.SentenceTransformer` (via unittest.mock.patch).
+SentenceTransformer: Any = None
 
 # ---------------------------------------------------------------------------
 # Local model cache configuration
@@ -43,6 +47,12 @@ def get_sentence_transformer(
     Uses CPU device explicitly to avoid loading GPU/CUDA kernels.
     Thread-safe singleton pattern ensures model is loaded only once.
 
+    IMPORTANT: `sentence_transformers` (and therefore `torch`) is imported
+    lazily HERE — not at module load time — so that FastAPI startup and
+    uvicorn port-binding do not pay the ~150-250 MiB PyTorch import cost
+    on Render's 512 MiB free tier. The model is materialised only on the
+    first actual embedding call.
+
     The model is pre-downloaded into the local 'models/' directory during
     the Render build step (scripts/download_model.py) and baked into the
     Docker image. At runtime, we ALWAYS load from that local path using
@@ -55,6 +65,15 @@ def get_sentence_transformer(
                         models/ directory. Build-time downloads use
                         scripts/download_model.py instead.
     """
+    # LAZY import: this is the ONLY place we import sentence_transformers.
+    # It transitively imports torch (~150-250 MiB RSS at import time).
+    # Doing it here means PyTorch is initialised only on the first
+    # embedding request, AFTER uvicorn has already bound to $PORT.
+    global SentenceTransformer  # noqa: PLW0603 - intentional rebind for lazy load
+    if SentenceTransformer is None:
+        from sentence_transformers import SentenceTransformer as _SentenceTransformer
+        SentenceTransformer = _SentenceTransformer
+
     # If SentenceTransformer has been patched with a Mock (e.g. in unit tests), return mock call directly
     if isinstance(SentenceTransformer, (Mock, MagicMock, NonCallableMock, NonCallableMagicMock)):
         return SentenceTransformer(model_name)

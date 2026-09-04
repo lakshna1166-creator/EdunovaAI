@@ -19,8 +19,11 @@ Usage (local development):
 The model will be stored in:
     EdunovaAI/AI-Rag/ai-service/models/sentence-transformers/all-MiniLM-L6-v2/
 
-After downloading, add the model directory to .gitignore and commit it
-so it is baked into the Docker image on Render.
+The models/ directory is kept out of Git (see .gitignore: models/*).
+Render's build command downloads the model into this directory during
+`pip install -r requirements.txt && python scripts/download_model.py`,
+so it is available in the Docker image at runtime without needing
+model files committed to git.
 """
 from __future__ import annotations
 
@@ -135,7 +138,8 @@ def main() -> None:
     try:
         model_path = download_model()
         _eprint(f"[download_model] DONE. Model ready at: {model_path}")
-        _eprint("[download_model] Next: ensure 'models/' is in .gitignore and the model is committed.")
+        _eprint("[download_model] Next: models/ is already in .gitignore. The model will be")
+        _eprint("[download_model] downloaded by Render's build command at deploy time.")
     except Exception as exc:
         _eprint(f"[download_model] ERROR: {exc}")
         sys.exit(1)

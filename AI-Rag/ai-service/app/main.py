@@ -35,6 +35,20 @@ async def lifespan(_: FastAPI):
     of the process. This keeps FastAPI startup lightweight so the
     container can bind to $PORT within Render's 512 MiB free tier.
     """
+    import sys
+    import os
+
+    # Lightweight diagnostics — stdlib only, no extra dependencies.
+    # These log lines help confirm Python version, PID, and that
+    # SentenceTransformer has NOT been imported before the lifespan fires.
+    logger.info(
+        "[STARTUP] Python %s | PID %d | cwd %s | "
+        "SENTENCE_TRANSFORMERS_HOME=%s",
+        sys.version.split()[0],
+        os.getpid(),
+        os.getcwd(),
+        os.environ.get("SENTENCE_TRANSFORMERS_HOME", "(not set)"),
+    )
     logger.info("[STARTUP] Application starting...")
     logger.info("[STARTUP] Skipping SentenceTransformer preload (lazy load on first request).")
 
