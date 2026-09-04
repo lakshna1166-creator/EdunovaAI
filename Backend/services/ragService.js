@@ -1,5 +1,5 @@
 const RAG_SERVICE_URL =
-    process.env.RAG_SERVICE_URL || "https://edunovaai-2.onrender.com/docs";
+    process.env.RAG_SERVICE_URL;
 
 export const askRAG = async ({ question, level = "beginner" }) => {
     const response = await fetch(`${RAG_SERVICE_URL}/teacher/ask`, {
