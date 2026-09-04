@@ -17,11 +17,21 @@ logger = logging.getLogger(__name__)
 
 def get_sentence_transformer(
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    *,
+    allow_download: bool = False,
 ) -> Any:
     """Load or return the cached SentenceTransformer model once per process.
-    
+
     Uses CPU device explicitly to avoid loading GPU/CUDA kernels.
     Thread-safe singleton pattern ensures model is loaded only once.
+
+    Args:
+        model_name: HuggingFace model identifier.
+        allow_download: When False (default), only load from local cache.
+                        When True, allow remote download. Use True only at
+                        application startup (single thread, ample memory).
+                        Subsequent calls should pass False so the cached
+                        model is returned instantly.
     """
     # If SentenceTransformer has been patched with a Mock (e.g. in unit tests), return mock call directly
     if isinstance(SentenceTransformer, (Mock, MagicMock, NonCallableMock, NonCallableMagicMock)):
@@ -32,31 +42,54 @@ def get_sentence_transformer(
         with _CACHE_LOCK:
             # Double-check after acquiring lock
             if model_name not in _MODEL_CACHE:
-                logger.info("[PERF] Loading SentenceTransformer model '%s' (CPU only)...", model_name)
+                logger.info(
+                    "[PERF] Loading SentenceTransformer model '%s' (CPU, allow_download=%s)...",
+                    model_name,
+                    allow_download,
+                )
                 load_start = time.perf_counter()
                 try:
                     # Explicitly use CPU device to avoid loading CUDA kernels
                     _MODEL_CACHE[model_name] = SentenceTransformer(
                         model_name,
                         device="cpu",
-                        local_files_only=True,
+                        local_files_only=not allow_download,
                     )
                     logger.info(
-                        "[EMBEDDINGS] Model '%s' loaded from local cache (CPU, local_files_only=True).",
+                        "[EMBEDDINGS] Model '%s' loaded (CPU, local_files_only=%s).",
                         model_name,
+                        not allow_download,
                     )
                 except Exception as local_exc:
-                    # Safe diagnostics only: exception type + message, never secrets/paths with keys.
-                    logger.warning(
-                        "[EMBEDDINGS] Local-only load failed for '%s' (%s: %s). Trying remote download (CPU only)...",
+                    if not allow_download:
+                        # Already tried local-only; model is not in cache.
+                        # Raise immediately — we do NOT want to silently retry
+                        # inside a live request (causes OOM on Render).
+                        logger.error(
+                            "[EMBEDDINGS] Local-only load failed for '%s' "
+                            "(%s: %s). The model is not in the HuggingFace cache. "
+                            "Ensure the application pre-loads the model at startup "
+                            "(which downloads and caches it once).",
+                            model_name,
+                            type(local_exc).__name__,
+                            local_exc,
+                        )
+                        raise RuntimeError(
+                            f"Embedding model '{model_name}' is not cached and "
+                            "allow_download=False was passed. "
+                            "Ensure the model is pre-loaded at application startup."
+                        ) from local_exc
+                    # allow_download=True but still failed — something is wrong with network/disk
+                    logger.error(
+                        "[EMBEDDINGS] Model download failed for '%s' (%s: %s). "
+                        "Giving up.",
                         model_name,
                         type(local_exc).__name__,
                         local_exc,
                     )
-                    _MODEL_CACHE[model_name] = SentenceTransformer(
-                        model_name,
-                        device="cpu",
-                    )
+                    raise RuntimeError(
+                        f"Failed to load embedding model '{model_name}': {local_exc}"
+                    ) from local_exc
                 load_time = time.perf_counter() - load_start
                 logger.info("[PERF] SentenceTransformer loaded in %.2fs", load_time)
     else:
@@ -83,8 +116,11 @@ class GeminiEmbeddingProvider:
         self,
         model: Any | None = None,
         dimension: int | None = None,
+        *,
+        allow_download: bool = False,
     ) -> None:
         self.dimension = dimension or self.DEFAULT_DIMENSION
+        self._allow_download = allow_download
         if isinstance(model, str):
             self.model_name = model
             self._model = None
@@ -98,7 +134,7 @@ class GeminiEmbeddingProvider:
     @property
     def model(self) -> Any:
         if self._model is None:
-            self._model = get_sentence_transformer(self.model_name)
+            self._model = get_sentence_transformer(self.model_name, allow_download=self._allow_download)
         return self._model
 
     @staticmethod
@@ -219,16 +255,70 @@ _PROVIDER_LOCK = threading.Lock()
 
 def get_embedding_provider() -> GeminiEmbeddingProvider:
     """Get or create the singleton embedding provider instance.
-    
+
     This ensures the embedding provider (and its SentenceTransformer model)
     is only instantiated once per application process.
+
+    The returned provider is configured with `allow_download=False` for
+    safety: by the time a request handler runs, the model must already
+    be in the local HuggingFace cache. Use `preload_embedding_model()`
+    at application startup to populate the cache exactly once.
     """
     global _EMBEDDING_PROVIDER_INSTANCE
     if _EMBEDDING_PROVIDER_INSTANCE is None:
         with _PROVIDER_LOCK:
             if _EMBEDDING_PROVIDER_INSTANCE is None:
-                _EMBEDDING_PROVIDER_INSTANCE = GeminiEmbeddingProvider()
+                _EMBEDDING_PROVIDER_INSTANCE = GeminiEmbeddingProvider(
+                    allow_download=False,
+                )
     return _EMBEDDING_PROVIDER_INSTANCE
+
+
+def preload_embedding_model() -> GeminiEmbeddingProvider:
+    """Pre-load the embedding model ONCE at application startup.
+
+    This function is intended to be called from the FastAPI lifespan
+    handler in `app/main.py`. It:
+
+    1. Creates the singleton provider (if not already created).
+    2. Forces the model to be loaded into memory on a single thread.
+    3. Permits a one-time remote download (the result is then cached on
+       disk for subsequent process restarts, assuming Render persists
+       the disk layer across deploys — see notes below).
+
+    If the model is already cached on disk, the call returns almost
+    immediately. If not, it downloads once, caches, and returns.
+
+    This guarantees that no `/teacher/ask` request ever has to download
+    the model under live request memory pressure (the original Render
+    512 MiB OOM cause).
+    """
+    global _EMBEDDING_PROVIDER_INSTANCE
+    # Make sure the singleton provider exists. We temporarily allow the
+    # download path so the startup pre-load can populate the local
+    # HuggingFace cache if it is empty.
+    if _EMBEDDING_PROVIDER_INSTANCE is None:
+        with _PROVIDER_LOCK:
+            if _EMBEDDING_PROVIDER_INSTANCE is None:
+                _EMBEDDING_PROVIDER_INSTANCE = GeminiEmbeddingProvider(
+                    allow_download=True,
+                )
+    provider = _EMBEDDING_PROVIDER_INSTANCE
+
+    # Force eager load with download permission so the model is
+    # materialised in this process exactly once. After this returns,
+    # _MODEL_CACHE contains the singleton SentenceTransformer instance.
+    logger.info(
+        "[EMBEDDINGS] Pre-loading model '%s' (startup, allow_download=True)",
+        provider.model_name,
+    )
+    get_sentence_transformer(provider.model_name, allow_download=True)
+
+    # Ensure the provider's own `_model` reference points at the same
+    # cached object. After this, request handlers will NEVER trigger a
+    # second load — they will reuse the in-memory instance.
+    _ = provider.model
+    return provider
 
 
 def generate_embedding(text: str) -> list[float]:
