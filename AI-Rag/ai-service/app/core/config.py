@@ -64,12 +64,6 @@ SUPABASE_URL: Final[str] = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY: Final[str] = os.getenv("SUPABASE_KEY", "")
 
 # ----------------------------------------------------------------------
-# HeyGen Configuration
-# ----------------------------------------------------------------------
-
-HEYGEN_API_KEY: Final[str] = os.getenv("HEYGEN_API_KEY", "")
-
-# ----------------------------------------------------------------------
 # RAG Configuration
 # ----------------------------------------------------------------------
 

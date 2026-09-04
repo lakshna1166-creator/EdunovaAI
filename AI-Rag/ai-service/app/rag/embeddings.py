@@ -46,7 +46,7 @@ def get_sentence_transformer(
     The model is pre-downloaded into the local 'models/' directory during
     the Render build step (scripts/download_model.py) and baked into the
     Docker image. At runtime, we ALWAYS load from that local path using
-    cache_dir pointing to the committed models/ directory.
+    `cache_folder` pointing to the committed models/ directory.
 
     Args:
         model_name: HuggingFace model identifier.
@@ -66,12 +66,13 @@ def get_sentence_transformer(
             if model_name not in _MODEL_CACHE:
                 # The model is baked into models/ at build time.
                 # We ALWAYS load local-only at runtime for memory safety.
-                cache_dir = str(_LOCAL_MODELS_DIR / "huggingface")
+                # sentence-transformers>=5.0 uses `cache_folder` (not `cache_dir`).
+                cache_folder = str(_LOCAL_MODELS_DIR / "huggingface")
 
                 logger.info(
-                    "[PERF] Loading SentenceTransformer model '%s' (CPU, cache_dir='%s')...",
+                    "[PERF] Loading SentenceTransformer model '%s' (CPU, cache_folder='%s')...",
                     model_name,
-                    cache_dir,
+                    cache_folder,
                 )
                 load_start = time.perf_counter()
                 try:
@@ -81,13 +82,13 @@ def get_sentence_transformer(
                     _MODEL_CACHE[model_name] = SentenceTransformer(
                         model_name,
                         device="cpu",
-                        cache_dir=cache_dir,
+                        cache_folder=cache_folder,
                         local_files_only=True,
                     )
                     logger.info(
-                        "[EMBEDDINGS] Model '%s' loaded (CPU, cache_dir='%s').",
+                        "[EMBEDDINGS] Model '%s' loaded (CPU, cache_folder='%s').",
                         model_name,
-                        cache_dir,
+                        cache_folder,
                     )
                 except Exception as local_exc:
                     # The model was not found in models/huggingface/.
@@ -99,11 +100,11 @@ def get_sentence_transformer(
                         "Run 'python scripts/download_model.py' during the Render "
                         "build step to pre-download the model.",
                         model_name,
-                        cache_dir,
+                        cache_folder,
                     )
                     raise RuntimeError(
                         f"Embedding model '{model_name}' not found in "
-                        f"'{cache_dir}'. "
+                        f"'{cache_folder}'. "
                         "Ensure scripts/download_model.py is run during the "
                         "Render build step to pre-download the model into "
                         "the models/ directory."

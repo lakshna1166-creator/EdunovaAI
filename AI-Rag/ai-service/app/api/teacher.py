@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field, field_validator
 from app.lesson.teacher import AITeacherService
 from app.llm.unified import GeminiLLMClient, classify_llm_error
 from app.rag.retriever import RAGRetriever
-from app.services.heygen import generate_teacher_video, is_configured
 
 logger = logging.getLogger(__name__)
 
@@ -112,13 +111,6 @@ class TeacherSource(BaseModel):
     score: float | None = None
 
 
-class VideoInfo(BaseModel):
-    status: str
-    video_id: str | None = None
-    video_url: str | None = None
-    error: str | None = None
-
-
 class TeacherAskResponse(BaseModel):
     answer: str
     explanation: str
@@ -126,7 +118,6 @@ class TeacherAskResponse(BaseModel):
     check_question: str
     difficulty: str
     sources: list[TeacherSource]
-    video: VideoInfo | None = None
 
 
 class QuizQuestion(BaseModel):
@@ -219,22 +210,9 @@ async def ask_teacher(payload: TeacherAskRequest) -> dict[str, Any]:
         # with a clear message — never as a generic 500.
         raise _generation_http_exception(exc) from exc
 
-    # Attempt HeyGen video generation (non-blocking for the response).
-    # Failures are always converted to a safe status; the text answer
-    # is ALWAYS returned to the student regardless of video outcome.
-    if is_configured():
-        try:
-            video_status = generate_teacher_video(question, teacher_response)
-        except Exception as exc:  # pragma: no cover - defensive; all HeyGen errors are handled inside the service
-            logger.warning("[TEACHER] HeyGen video generation failed: %s", exc)
-            video_status = {"status": "failed", "error": "Video generation failed; the text answer is still available."}
-    else:
-        video_status = {"status": "disabled", "error": "HEYGEN_API_KEY is not configured."}
-
     return {
         **teacher_response,
         "sources": _build_sources_from_chunks(relevant_chunks),
-        "video": video_status,
     }
 
 
