@@ -31,6 +31,17 @@ _LOCAL_MODELS_DIR = _PROJECT_ROOT / "models"
 # Set SENTENCE_TRANSFORMERS_HOME so huggingface_hub resolves the local cache.
 os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_LOCAL_MODELS_DIR / "huggingface"))
 
+# Suppress transformers/sentence_transformers version-compatibility network checks.
+# On Render, import of sentence_transformers takes ~80 s because
+# `transformers.dependency_versions_check` (a PyPI version-advisory check that
+# runs inside `transformers/__init__.py`) makes a live network request on import.
+# Setting TRANSFORMERS_NO_ADVISORY_WARNINGS=1 disables that check entirely.
+# HF_HUB_DISABLE_VERSION_CHECK further silences huggingface_hub telemetry pings.
+# These are safe because the model is baked into the Docker image — no
+# version-resolution is needed at runtime.
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_VERSION_CHECK", "1")
+
 # Thread-safe model cache with lock for singleton pattern
 _MODEL_CACHE: dict[str, Any] = {}
 _CACHE_LOCK = threading.Lock()
@@ -211,8 +222,12 @@ class GeminiEmbeddingProvider:
             # OSError: [Errno 22] Invalid argument, surfacing as
             # "Local embedding generation failed: [Errno 22] Invalid argument".
             # embed_batch already passes show_progress_bar=False; keep both in sync.
+            # IMPORTANT: bind `model` to a local FIRST so the encode() timer
+            # below does NOT include the self.model property access (which
+            # can trigger lazy import / model load on the very first call).
+            model = self.model
             encode_start = time.perf_counter()
-            vector = self.model.encode(
+            vector = model.encode(
                 cleaned,
                 convert_to_numpy=True,
                 show_progress_bar=False,
@@ -260,8 +275,11 @@ class GeminiEmbeddingProvider:
             len(normalized_texts),
         )
         try:
+            # Bind `model` to a local FIRST so the encode() timer below does
+            # NOT include the self.model property access.
+            model = self.model
             encode_start = time.perf_counter()
-            vectors = self.model.encode(
+            vectors = model.encode(
                 normalized_texts,
                 convert_to_numpy=True,
                 batch_size=32,
