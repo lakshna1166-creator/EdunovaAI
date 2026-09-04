@@ -1,12 +1,22 @@
 import supabase from "../config/supabase.js";
-
+import { askRAG } from "../services/ragService.js";
 /**
  * Intelligent Socratic Tutor Dialogue Engine
  * POST /api/ai/chat
  */
+/**
+ * AI Teacher Chat powered by RAG service
+ * POST /api/ai/chat
+ */
 export const socraticChat = async (req, res, next) => {
   try {
-    const { message, topic = "Backpropagation & Neural Networks", tutorMode = "socratic", history = [] } = req.body || {};
+    const {
+      message,
+      topic = "General",
+      tutorMode = "socratic",
+      history = []
+    } = req.body || {};
+
     const userId = req.user?.userId;
 
     if (!message || !message.trim()) {
@@ -16,70 +26,23 @@ export const socraticChat = async (req, res, next) => {
       });
     }
 
-    const trimmedMsg = message.trim().toLowerCase();
+    // Map frontend tutor modes to RAG teaching levels
+    const levelMap = {
+      eli5: "beginner",
+      first_principles: "intermediate",
+      feynman: "advanced",
+      socratic: "intermediate"
+    };
 
-    // Misconception Detection Heuristics
-    let type = "answer";
-    let aiResponse = "";
-    let remediation = null;
-    let conceptHighlight = null;
+    const level = levelMap[tutorMode] || "beginner";
 
-    if (
-      trimmedMsg.includes("equal") ||
-      trimmedMsg.includes("same fraction") ||
-      trimmedMsg.includes("divide equally") ||
-      trimmedMsg.includes("same weight")
-    ) {
-      type = "misconception";
-      conceptHighlight = "Proportional Responsibility vs Equal Division";
-      remediation = "Think of a committee vote: A member who voted aggressively with 10x authority bears more responsibility than an abstaining member.";
-      aiResponse = `Careful! Assigning equal fractions assumes every neuron has the same activation and weight. In reality, neurons with larger weights and higher activation fired stronger, so they carried a larger share of the blame via their partial derivative (Chain Rule: ∂L/∂w = ∂L/∂a · ∂a/∂z · ∂z/∂w).
+    // Send the student's question to the RAG Teacher Service
+    const ragResponse = await askRAG({
+      question: message.trim(),
+      level
+    });
 
-How do you think the magnitude of the previous layer's activation affects how much we adjust this weight?`;
-    } else if (
-      trimmedMsg.includes("add") ||
-      trimmedMsg.includes("addition") ||
-      trimmedMsg.includes("plus")
-    ) {
-      type = "misconception";
-      conceptHighlight = "Multiplicative Chain Rule vs Additive Derivatives";
-      remediation = "Because layer functions are nested f(g(h(x))), we multiply rates of change rather than sum them.";
-      aiResponse = `Let's reflect on calculus for a moment: When functions are nested inside each other like f(g(x)), how does a small change in x ripple through g and into f? Do the rates of change add up, or do they multiply?`;
-    } else if (
-      trimmedMsg.includes("gradient") ||
-      trimmedMsg.includes("derivative") ||
-      trimmedMsg.includes("chain rule") ||
-      trimmedMsg.includes("partial") ||
-      trimmedMsg.includes("sensitivity") ||
-      trimmedMsg.includes("learning rate")
-    ) {
-      type = "success";
-      conceptHighlight = "Mastery of Gradient Sensitivity";
-      aiResponse = `Spot on! By computing the gradient with respect to that specific weight, we scale the weight update proportional to its direct sensitivity. 
-
-Let's test the boundary: What happens if the activation function saturates (its derivative approaches 0)? How does that affect all the weights deeper in the network?`;
-    } else {
-      // General Mode-specific Responses
-      if (tutorMode === "eli5") {
-        aiResponse = `Imagine a factory assembly line making cookies. If the cookies come out too salty at the end, the master chef walks backward along the line, checking who poured in how much salt. The chef gives more feedback to the worker who dumped a whole bucket than to the one who dropped a pinch!
-
-How does this relate to the weights in our neural network?`;
-      } else if (tutorMode === "first_principles") {
-        aiResponse = `Let's break this down to first principles:
-1. Every neural layer is an affine transformation: z = Wx + b.
-2. An activation function applies non-linearity: a = σ(z).
-3. The loss function L compares output ŷ against target y.
-
-To minimize L, we need the exact vector direction of steepest ascent, which is ∇_W L. What calculus theorem allows us to compute ∇_W L layer by layer?`;
-      } else if (tutorMode === "feynman") {
-        aiResponse = `Great start! Now explain this to me as if I were a 10-year-old: If you change one single number in the very first layer of a 10-layer network, why does the final answer at the output move?`;
-      } else {
-        // Standard Socratic
-        aiResponse = `Interesting point! Let's examine that closely: If you decrease the learning rate η by a factor of 10, how does that alter the stability of the loss landscape navigation during the backward pass?`;
-      }
-    }
-
-    // Record conversation in database if student is logged in
+    // Store conversation in Supabase
     if (userId) {
       try {
         await supabase.from("ai_tutor_chats").insert([
@@ -95,12 +58,20 @@ To minimize L, we need the exact vector direction of steepest ascent, which is �
             topic,
             tutor_mode: tutorMode,
             sender: "ai",
-            message: aiResponse,
-            metadata: { type, remediation, conceptHighlight }
+            message: ragResponse.answer || ragResponse.explanation || "",
+            metadata: {
+              type: "rag_teacher",
+              difficulty: ragResponse.difficulty || null,
+              sources: ragResponse.sources || [],
+              video: ragResponse.video || null
+            }
           }
         ]);
       } catch (dbErr) {
-        console.warn("Could not record chat history to DB:", dbErr.message);
+        console.warn(
+          "Could not record chat history to DB:",
+          dbErr.message
+        );
       }
     }
 
@@ -108,14 +79,30 @@ To minimize L, we need the exact vector direction of steepest ascent, which is �
       success: true,
       message: {
         sender: "ai",
-        text: aiResponse,
-        type,
-        remediation,
-        conceptHighlight,
+
+        // Main AI Teacher response
+        text:
+          ragResponse.answer ||
+          ragResponse.explanation ||
+          "I could not generate a response.",
+
+        type: "rag_teacher",
+
+        // Extra teaching information from RAG
+        explanation: ragResponse.explanation || null,
+        example: ragResponse.example || null,
+        checkQuestion: ragResponse.check_question || null,
+        difficulty: ragResponse.difficulty || null,
+        sources: ragResponse.sources || [],
+
+        // HeyGen video information
+        video: ragResponse.video || null,
+
         timestamp: new Date().toISOString()
       }
     });
   } catch (error) {
+    console.error("AI Teacher / RAG Error:", error.message);
     next(error);
   }
 };
