@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { 
-  Bot, 
-  User, 
-  Send, 
-  AlertTriangle, 
-  ArrowRight, 
+import {
+  Bot,
+  User,
+  Send,
+  AlertTriangle,
+  ArrowRight,
   Zap,
   Award,
   Sparkles,
@@ -50,15 +50,13 @@ export default function AITeacherPage() {
     setInputMessage('');
 
     try {
-      const { aiApi } = await import('../../services/api');
-      const result = await aiApi.chat({
-        message: userText,
-        topic: currentTopic,
-        tutorMode: activeTutorMode,
-        history: messages
+      const { teacherApi } = await import('../../services/api');
+      const result = await teacherApi.ask({
+        question: userText,
+        level: 'beginner'
       });
-      const reply = result?.message || result?.data?.message;
-      if (reply) setMessages((prev) => [...prev, reply]);
+      const reply = result?.answer || result?.data?.answer;
+      if (reply) setMessages((prev) => [...prev, { sender: 'ai', text: reply }]);
       setShowExplainDifferently(false);
     } catch (error) {
       setMessages((prev) => [...prev, { sender: 'ai', text: 'I could not process that question yet. Please try again.' }]);
@@ -154,13 +152,13 @@ export default function AITeacherPage() {
                       background: msg.sender === 'user'
                         ? '#EFF6FF'
                         : msg.type === 'misconception'
-                        ? '#FFF1F2'
-                        : '#F8FAFC',
+                          ? '#FFF1F2'
+                          : '#F8FAFC',
                       border: msg.sender === 'user'
                         ? '1px solid #BFDBFE'
                         : msg.type === 'misconception'
-                        ? '1px solid #FECDD3'
-                        : '1px solid #E2E8F0',
+                          ? '1px solid #FECDD3'
+                          : '1px solid #E2E8F0',
                       color: msg.sender === 'user' ? '#1E3A8A' : '#1E293B',
                       fontSize: '0.92rem',
                       lineHeight: 1.6
