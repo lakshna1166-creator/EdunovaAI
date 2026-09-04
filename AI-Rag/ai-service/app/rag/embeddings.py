@@ -37,10 +37,14 @@ os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_LOCAL_MODELS_DIR / "hug
 # runs inside `transformers/__init__.py`) makes a live network request on import.
 # Setting TRANSFORMERS_NO_ADVISORY_WARNINGS=1 disables that check entirely.
 # HF_HUB_DISABLE_VERSION_CHECK further silences huggingface_hub telemetry pings.
-# These are safe because the model is baked into the Docker image — no
-# version-resolution is needed at runtime.
+# TRANSFORMERS_OFFLINE=1 prevents ALL network operations during import, which
+# is critical for avoiding ~76s delays when running on Render's constrained
+# network environment. This is safe because the model is baked into the Docker
+# image — no version-resolution or downloads are needed at runtime.
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_VERSION_CHECK", "1")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # Thread-safe model cache with lock for singleton pattern
 _MODEL_CACHE: dict[str, Any] = {}
