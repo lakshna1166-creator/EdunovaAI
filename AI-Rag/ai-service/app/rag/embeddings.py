@@ -71,8 +71,16 @@ def get_sentence_transformer(
     # embedding request, AFTER uvicorn has already bound to $PORT.
     global SentenceTransformer  # noqa: PLW0603 - intentional rebind for lazy load
     if SentenceTransformer is None:
+        # Timing the import separately lets us attribute first-request latency
+        # between the lazy import+init (PyTorch, numpy, etc.) vs the actual
+        # model loading vs the encode() call.
+        _import_start = time.perf_counter()
         from sentence_transformers import SentenceTransformer as _SentenceTransformer
         SentenceTransformer = _SentenceTransformer
+        logger.info(
+            "[PERF] sentence_transformers import: %.2fs",
+            time.perf_counter() - _import_start,
+        )
 
     # If SentenceTransformer has been patched with a Mock (e.g. in unit tests), return mock call directly
     if isinstance(SentenceTransformer, (Mock, MagicMock, NonCallableMock, NonCallableMagicMock)):
@@ -129,7 +137,7 @@ def get_sentence_transformer(
                         "the models/ directory."
                     ) from local_exc
                 load_time = time.perf_counter() - load_start
-                logger.info("[PERF] SentenceTransformer loaded in %.2fs", load_time)
+                logger.info("[PERF] SentenceTransformer model load: %.2fs", load_time)
     else:
         logger.debug("[EMBEDDINGS] Reusing cached SentenceTransformer model '%s'.", model_name)
     return _MODEL_CACHE[model_name]
@@ -195,7 +203,6 @@ class GeminiEmbeddingProvider:
             len(cleaned),
         )
         try:
-            start = time.perf_counter()
             # NOTE: show_progress_bar=False is REQUIRED here. When it is left as
             # None, sentence-transformers enables the tqdm "Batches" progress bar
             # whenever the root logger level is INFO/DEBUG (which app/main.py sets).
@@ -204,19 +211,21 @@ class GeminiEmbeddingProvider:
             # OSError: [Errno 22] Invalid argument, surfacing as
             # "Local embedding generation failed: [Errno 22] Invalid argument".
             # embed_batch already passes show_progress_bar=False; keep both in sync.
+            encode_start = time.perf_counter()
             vector = self.model.encode(
                 cleaned,
                 convert_to_numpy=True,
                 show_progress_bar=False,
             )
+            encode_time = time.perf_counter() - encode_start
+            logger.info("[PERF] encode(): %.2fs", encode_time)
+
             logger.debug(
                 "[EMBEDDINGS] encode ok | result_type=%s | shape=%s",
                 type(vector).__name__,
                 getattr(vector, "shape", None),
             )
             values = self._normalize_vector(vector)
-            embed_time = time.perf_counter() - start
-            logger.info("[PERF] Embedding: %.2fs", embed_time)
             if self.dimension and len(values) != self.dimension:
                 raise ValueError(
                     f"Embedding dimension mismatch: expected {self.dimension}, got {len(values)}. "
@@ -251,13 +260,16 @@ class GeminiEmbeddingProvider:
             len(normalized_texts),
         )
         try:
-            batch_start = time.perf_counter()
+            encode_start = time.perf_counter()
             vectors = self.model.encode(
                 normalized_texts,
                 convert_to_numpy=True,
                 batch_size=32,
                 show_progress_bar=False,
             )
+            encode_time = time.perf_counter() - encode_start
+            logger.info("[PERF] batch encode(): %.2fs", encode_time)
+
             logger.debug(
                 "[EMBEDDINGS] embed_batch encode ok | result_type=%s | shape=%s",
                 type(vectors).__name__,
@@ -274,7 +286,6 @@ class GeminiEmbeddingProvider:
                         "Update the Supabase vector column to match the model output size."
                     )
                 rows.append(values)
-            logger.info("[PERF] Batch embedding: %.2fs for %d text(s)", time.perf_counter() - batch_start, len(rows))
             return rows
         except Exception as exc:
             logger.exception(
