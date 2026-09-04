@@ -70,7 +70,7 @@ async function request(endpoint, options = {}) {
 
   const timeoutId = setTimeout(() => {
     controller.abort();
-  }, 20000);
+  }, 180000);
 
   let response;
 
