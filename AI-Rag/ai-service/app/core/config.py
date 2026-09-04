@@ -28,10 +28,10 @@ else:
 # Gemini API Configuration
 # ----------------------------------------------------------------------
 
-# Load Gemini API keys (GEMINI_API_KEY_1 through GEMINI_API_KEY_12)
+# Load Gemini API keys (GEMINI_API_KEY_1 through GEMINI_API_KEY_13)
 # Empty/missing keys are ignored
 _GEMINI_KEYS: list[str] = []
-for i in range(1, 12):
+for i in range(1, 13):
     key = os.getenv(f"GEMINI_API_KEY_{i}", "").strip()
     if key:
         _GEMINI_KEYS.append(key)
