@@ -57,7 +57,7 @@ const defaultOrigins = [
   "http://localhost:5174",
   "http://localhost:3000",
   "https://edunovaai.onrender.com",
-  "https://edunova-fpa37b2tx-athens2.vercel.app"
+  "https://edunova-cpdu81xy3-athens2.vercel.app"
 ];
 
 const allowedOrigins = [
