@@ -1,4 +1,4 @@
-"""Teacher LLM error-handling tests: quota->503, HeyGen never 500, no quota masking."""
+"""Teacher LLM error-handling tests: quota->503, no quota masking."""
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -88,23 +88,6 @@ def test_teacher_ask_returns_500_without_leak_on_unexpected_error() -> None:
 
     assert response.status_code == 500
     assert "leaked-secret-xyz" not in response.json()["detail"]
-
-
-def test_teacher_ask_heygen_failure_never_turns_success_into_500() -> None:
-    """A HeyGen crash after successful text generation must still return HTTP 200."""
-    with (
-        patch("app.api.teacher.RAGRetriever.retrieve", return_value=_chunks()),
-        patch("app.lesson.teacher.get_llm_client") as mock_get_llm,
-        patch("app.api.teacher.is_configured", return_value=True),
-        patch("app.api.teacher.generate_teacher_video", side_effect=RuntimeError("heygen boom")),
-    ):
-        mock_get_llm.return_value.generate_response.return_value = _OK_TEACHER_JSON
-        response = client.post("/teacher/ask", json={"question": "What is photosynthesis?"})
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["answer"] == "Plants use sunlight to make food."
-    assert payload["video"]["status"] == "failed"
 
 
 def test_key_rotation_on_quota_error() -> None:

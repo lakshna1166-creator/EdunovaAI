@@ -9,9 +9,11 @@ venv/
 env/
 ENV/
 
-# Environment Variables
+# Environment Variables — NEVER commit secrets
 .env
+.env.*
 *.env.local
+!.env.example
 
 # IDE / Editor files
 .vscode/
@@ -22,6 +24,10 @@ ENV/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# SentenceTransformer model files (committed to bake into Docker image on Render)
+models/*
+!models/.gitkeep
 
 # Data / Uploads
 data/uploads/*

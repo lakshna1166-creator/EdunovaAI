@@ -28,10 +28,10 @@ else:
 # Gemini API Configuration
 # ----------------------------------------------------------------------
 
-# Load Gemini API keys (GEMINI_API_KEY_1 through GEMINI_API_KEY_9)
+# Load Gemini API keys (GEMINI_API_KEY_1 through GEMINI_API_KEY_17)
 # Empty/missing keys are ignored
 _GEMINI_KEYS: list[str] = []
-for i in range(1, 10):
+for i in range(1, 18):
     key = os.getenv(f"GEMINI_API_KEY_{i}", "").strip()
     if key:
         _GEMINI_KEYS.append(key)
@@ -62,12 +62,6 @@ GEMINI_RETRY_DELAY_SECONDS: Final[float] = float(
 
 SUPABASE_URL: Final[str] = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY: Final[str] = os.getenv("SUPABASE_KEY", "")
-
-# ----------------------------------------------------------------------
-# HeyGen Configuration
-# ----------------------------------------------------------------------
-
-HEYGEN_API_KEY: Final[str] = os.getenv("HEYGEN_API_KEY", "")
 
 # ----------------------------------------------------------------------
 # RAG Configuration

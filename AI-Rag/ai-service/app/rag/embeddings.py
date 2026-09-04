@@ -1,44 +1,135 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import time
+from pathlib import Path
 from typing import Any, Sequence
 from unittest.mock import MagicMock, Mock, NonCallableMagicMock, NonCallableMock
 
-from sentence_transformers import SentenceTransformer
+# Lazily initialised when get_sentence_transformer() is first called.
+# See get_sentence_transformer() for rationale.
+# IMPORTANT: Keep this module-level binding so that tests can still patch
+# `app.rag.embeddings.SentenceTransformer` (via unittest.mock.patch).
+SentenceTransformer: Any = None
 
+# ---------------------------------------------------------------------------
+# Local model cache configuration
+# ---------------------------------------------------------------------------
+# The SentenceTransformer model is pre-downloaded into the local 'models/'
+# directory during the Render build step (see scripts/download_model.py).
+# This directory is committed to the repository so it is baked into the
+# Docker image. At runtime, we load exclusively from this local path with
+# local_files_only=True to avoid the remote download that was causing OOM
+# on the 512 MiB Render free tier.
+
+# Resolve the local models directory relative to the project root.
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_LOCAL_MODELS_DIR = _PROJECT_ROOT / "models"
+
+# Set SENTENCE_TRANSFORMERS_HOME so huggingface_hub resolves the local cache.
+os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_LOCAL_MODELS_DIR / "huggingface"))
+
+# Thread-safe model cache with lock for singleton pattern
 _MODEL_CACHE: dict[str, Any] = {}
+_CACHE_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 
 
 def get_sentence_transformer(
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    *,
+    allow_download: bool = False,
 ) -> Any:
-    """Load or return the cached SentenceTransformer model once per process."""
+    """Load or return the cached SentenceTransformer model once per process.
+
+    Uses CPU device explicitly to avoid loading GPU/CUDA kernels.
+    Thread-safe singleton pattern ensures model is loaded only once.
+
+    IMPORTANT: `sentence_transformers` (and therefore `torch`) is imported
+    lazily HERE — not at module load time — so that FastAPI startup and
+    uvicorn port-binding do not pay the ~150-250 MiB PyTorch import cost
+    on Render's 512 MiB free tier. The model is materialised only on the
+    first actual embedding call.
+
+    The model is pre-downloaded into the local 'models/' directory during
+    the Render build step (scripts/download_model.py) and baked into the
+    Docker image. At runtime, we ALWAYS load from that local path using
+    `cache_folder` pointing to the committed models/ directory.
+
+    Args:
+        model_name: HuggingFace model identifier.
+        allow_download: Deprecated. Kept for backward compatibility. Runtime
+                        always uses local_files_only=True from the baked-in
+                        models/ directory. Build-time downloads use
+                        scripts/download_model.py instead.
+    """
+    # LAZY import: this is the ONLY place we import sentence_transformers.
+    # It transitively imports torch (~150-250 MiB RSS at import time).
+    # Doing it here means PyTorch is initialised only on the first
+    # embedding request, AFTER uvicorn has already bound to $PORT.
+    global SentenceTransformer  # noqa: PLW0603 - intentional rebind for lazy load
+    if SentenceTransformer is None:
+        from sentence_transformers import SentenceTransformer as _SentenceTransformer
+        SentenceTransformer = _SentenceTransformer
+
     # If SentenceTransformer has been patched with a Mock (e.g. in unit tests), return mock call directly
     if isinstance(SentenceTransformer, (Mock, MagicMock, NonCallableMock, NonCallableMagicMock)):
         return SentenceTransformer(model_name)
 
+    # Thread-safe check and load
     if model_name not in _MODEL_CACHE:
-        logger.info("[PERF] Loading SentenceTransformer model '%s'...", model_name)
-        load_start = time.perf_counter()
-        try:
-            _MODEL_CACHE[model_name] = SentenceTransformer(model_name, local_files_only=True)
-            logger.info(
-                "[EMBEDDINGS] Model '%s' loaded from local cache (local_files_only=True).",
-                model_name,
-            )
-        except Exception as local_exc:
-            # Safe diagnostics only: exception type + message, never secrets/paths with keys.
-            logger.warning(
-                "[EMBEDDINGS] Local-only load failed for '%s' (%s: %s). Trying remote download...",
-                model_name,
-                type(local_exc).__name__,
-                local_exc,
-            )
-            _MODEL_CACHE[model_name] = SentenceTransformer(model_name)
-        load_time = time.perf_counter() - load_start
-        logger.info("[PERF] SentenceTransformer loaded in %.2fs", load_time)
+        with _CACHE_LOCK:
+            # Double-check after acquiring lock
+            if model_name not in _MODEL_CACHE:
+                # The model is baked into models/ at build time.
+                # We ALWAYS load local-only at runtime for memory safety.
+                # sentence-transformers>=5.0 uses `cache_folder` (not `cache_dir`).
+                cache_folder = str(_LOCAL_MODELS_DIR / "huggingface")
+
+                logger.info(
+                    "[PERF] Loading SentenceTransformer model '%s' (CPU, cache_folder='%s')...",
+                    model_name,
+                    cache_folder,
+                )
+                load_start = time.perf_counter()
+                try:
+                    # Explicitly use CPU device to avoid loading CUDA kernels.
+                    # local_files_only=True ensures we NEVER attempt a remote
+                    # download at runtime (which would OOM on Render 512 MiB).
+                    _MODEL_CACHE[model_name] = SentenceTransformer(
+                        model_name,
+                        device="cpu",
+                        cache_folder=cache_folder,
+                        local_files_only=True,
+                    )
+                    logger.info(
+                        "[EMBEDDINGS] Model '%s' loaded (CPU, cache_folder='%s').",
+                        model_name,
+                        cache_folder,
+                    )
+                except Exception as local_exc:
+                    # The model was not found in models/huggingface/.
+                    # This means the build step (scripts/download_model.py)
+                    # was not run or the model was not committed.
+                    logger.error(
+                        "[EMBEDDINGS] Model '%s' not found in local cache '%s'. "
+                        "Expected model files in models/huggingface/snapshots/. "
+                        "Run 'python scripts/download_model.py' during the Render "
+                        "build step to pre-download the model.",
+                        model_name,
+                        cache_folder,
+                    )
+                    raise RuntimeError(
+                        f"Embedding model '{model_name}' not found in "
+                        f"'{cache_folder}'. "
+                        "Ensure scripts/download_model.py is run during the "
+                        "Render build step to pre-download the model into "
+                        "the models/ directory."
+                    ) from local_exc
+                load_time = time.perf_counter() - load_start
+                logger.info("[PERF] SentenceTransformer loaded in %.2fs", load_time)
     else:
         logger.debug("[EMBEDDINGS] Reusing cached SentenceTransformer model '%s'.", model_name)
     return _MODEL_CACHE[model_name]
@@ -63,8 +154,11 @@ class GeminiEmbeddingProvider:
         self,
         model: Any | None = None,
         dimension: int | None = None,
+        *,
+        allow_download: bool = False,
     ) -> None:
         self.dimension = dimension or self.DEFAULT_DIMENSION
+        self._allow_download = allow_download
         if isinstance(model, str):
             self.model_name = model
             self._model = None
@@ -78,7 +172,7 @@ class GeminiEmbeddingProvider:
     @property
     def model(self) -> Any:
         if self._model is None:
-            self._model = get_sentence_transformer(self.model_name)
+            self._model = get_sentence_transformer(self.model_name, allow_download=self._allow_download)
         return self._model
 
     @staticmethod
@@ -192,8 +286,78 @@ class GeminiEmbeddingProvider:
             raise RuntimeError(f"Batch embedding generation failed: {exc}") from exc
 
 
+# Module-level singleton for embedding provider
+_EMBEDDING_PROVIDER_INSTANCE: GeminiEmbeddingProvider | None = None
+_PROVIDER_LOCK = threading.Lock()
+
+
 def get_embedding_provider() -> GeminiEmbeddingProvider:
-    return GeminiEmbeddingProvider()
+    """Get or create the singleton embedding provider instance.
+
+    This ensures the embedding provider (and its SentenceTransformer model)
+    is only instantiated once per application process.
+
+    The returned provider is configured with `allow_download=False` for
+    safety: by the time a request handler runs, the model must already
+    be in the local HuggingFace cache. Use `preload_embedding_model()`
+    at application startup to populate the cache exactly once.
+    """
+    global _EMBEDDING_PROVIDER_INSTANCE
+    if _EMBEDDING_PROVIDER_INSTANCE is None:
+        with _PROVIDER_LOCK:
+            if _EMBEDDING_PROVIDER_INSTANCE is None:
+                _EMBEDDING_PROVIDER_INSTANCE = GeminiEmbeddingProvider(
+                    allow_download=False,
+                )
+    return _EMBEDDING_PROVIDER_INSTANCE
+
+
+def preload_embedding_model() -> GeminiEmbeddingProvider:
+    """Pre-load the embedding model ONCE at application startup.
+
+    This function is intended to be called from the FastAPI lifespan
+    handler in `app/main.py`. It:
+
+    1. Creates the singleton provider (if not already created).
+    2. Forces the model to be loaded from the local baked-in models/
+       directory into memory on a single thread.
+
+    The model must have been pre-downloaded during the Render build step
+    using scripts/download_model.py and committed to the repository so
+    it is baked into the Docker image. This function ALWAYS loads from
+    the local path with local_files_only=True.
+
+    This guarantees that:
+    - No remote download is attempted at runtime (which would OOM on
+      the 512 MiB Render free tier).
+    - No `/teacher/ask` request ever has to load the model under live
+      request memory pressure.
+    - We fail fast at startup with a clear error if the model is missing
+      (rather than OOM-ing on the first request).
+    """
+    global _EMBEDDING_PROVIDER_INSTANCE
+    if _EMBEDDING_PROVIDER_INSTANCE is None:
+        with _PROVIDER_LOCK:
+            if _EMBEDDING_PROVIDER_INSTANCE is None:
+                # allow_download=False is always enforced at runtime;
+                # the model is loaded from the baked-in models/ directory.
+                _EMBEDDING_PROVIDER_INSTANCE = GeminiEmbeddingProvider(
+                    allow_download=False,
+                )
+    provider = _EMBEDDING_PROVIDER_INSTANCE
+
+    logger.info(
+        "[EMBEDDINGS] Pre-loading model '%s' from local cache (models/)...",
+        provider.model_name,
+    )
+    # Always local-only at runtime; the model was pre-downloaded at build time.
+    get_sentence_transformer(provider.model_name, allow_download=False)
+
+    # Ensure the provider's own `_model` reference points at the same
+    # cached object. After this, request handlers will NEVER trigger a
+    # second load — they will reuse the in-memory instance.
+    _ = provider.model
+    return provider
 
 
 def generate_embedding(text: str) -> list[float]:

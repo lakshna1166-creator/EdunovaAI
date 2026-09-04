@@ -1,3 +1,14 @@
+"""FastAPI application entry point for the EduNovaAI RAG service.
+
+Adds a lifespan handler for graceful startup/shutdown. SentenceTransformer
+is loaded lazily on the first embedding request — NOT during startup — to
+avoid OOM on Render's 512 MiB free tier.
+
+Every request reuses the single in-process model instance via the singleton
+provider in `app.rag.embeddings`.
+"""
+from __future__ import annotations
+
 import logging
 from contextlib import asynccontextmanager
 
@@ -6,30 +17,48 @@ from fastapi import FastAPI
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.teacher import router as teacher_router
-from app.rag.answer import get_cached_rag_service
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """FastAPI lifespan context: warm up the cached RAG service at startup
-    so the embedding model is loaded once and reused across requests.
+async def lifespan(_: FastAPI):
+    """FastAPI lifespan handler.
+
+    SentenceTransformer is NOT loaded here. The model is loaded lazily on
+    the first embedding request, then cached as a singleton for the rest
+    of the process. This keeps FastAPI startup lightweight so the
+    container can bind to $PORT within Render's 512 MiB free tier.
     """
-    logger = logging.getLogger(__name__)
-    logger.info("[STARTUP] Warming up cached RAG service (loading models once)...")
-    # Initialize the cached RAG service - this loads SentenceTransformer
-    # and creates the Supabase + Gemini clients exactly once.
-    get_cached_rag_service()
-    logger.info("[STARTUP] Cached RAG service ready for fast /chat responses")
+    import sys
+    import os
+
+    # Lightweight diagnostics — stdlib only, no extra dependencies.
+    # These log lines help confirm Python version, PID, and that
+    # SentenceTransformer has NOT been imported before the lifespan fires.
+    logger.info(
+        "[STARTUP] Python %s | PID %d | cwd %s | "
+        "SENTENCE_TRANSFORMERS_HOME=%s",
+        sys.version.split()[0],
+        os.getpid(),
+        os.getcwd(),
+        os.environ.get("SENTENCE_TRANSFORMERS_HOME", "(not set)"),
+    )
+    logger.info("[STARTUP] Application starting...")
+    logger.info("[STARTUP] Skipping SentenceTransformer preload (lazy load on first request).")
+
     yield
-    # Shutdown: nothing to clean up explicitly.
+
+    logger.info("[SHUTDOWN] EduNovaAI RAG service shutting down.")
 
 
 app = FastAPI(title="EduNovaAI Teacher Service", lifespan=lifespan)
+
 app.include_router(documents_router)
 app.include_router(chat_router)
 app.include_router(teacher_router)

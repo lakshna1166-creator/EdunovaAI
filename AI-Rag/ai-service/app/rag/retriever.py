@@ -4,7 +4,7 @@ import logging
 from typing import Any, Sequence
 
 from app.core.config import RAG_SIMILARITY_THRESHOLD
-from app.rag.embeddings import GeminiEmbeddingProvider
+from app.rag.embeddings import GeminiEmbeddingProvider, get_embedding_provider
 from app.rag.vector_store import SupabaseVectorStore
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,8 @@ class RAGRetriever:
         top_k: int = 5,
         similarity_threshold: float | None = None,
     ) -> None:
-        self.embedding_provider = embedding_provider or GeminiEmbeddingProvider()
+        # Use singleton embedding provider to avoid loading the model multiple times
+        self.embedding_provider = embedding_provider or get_embedding_provider()
         self.vector_store = vector_store or SupabaseVectorStore()
         self.top_k = top_k
         # Optional minimum similarity score for a chunk to be considered
