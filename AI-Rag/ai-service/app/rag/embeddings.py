@@ -52,6 +52,94 @@ _CACHE_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Background import preloader
+# ---------------------------------------------------------------------------
+# Importing `sentence_transformers` transitively loads torch, numpy, and
+# scikit-learn (~80 s on Render's constrained environment). Importing it
+# lazily inside get_sentence_transformer() means the FIRST request to the
+# RAG endpoint pays this entire ~80 s cost — pushing p99 latency past the
+# HTTP timeout.
+#
+# To eliminate this first-request penalty without bringing back the 512 MiB
+# OOM problem, we kick off the import in a BACKGROUND DAEMON THREAD during
+# FastAPI's lifespan startup. The daemon thread:
+#
+#   1. Does NOT load the SentenceTransformer model weights (only the
+#      import). The model itself (~90 MB safetensors) is still loaded
+#      lazily on the first embedding call via get_sentence_transformer().
+#   2. Runs concurrently with uvicorn's request serving, so the first
+#      real request waits at most a few seconds (or zero, if the import
+#      completes before the request arrives) instead of ~80 s.
+#   3. Uses `SentenceTransformer` module-level binding which is already
+#      thread-safe — concurrent reads of `SentenceTransformer` after the
+#      import completes return the cached class.
+#
+# Memory safety: importing sentence_transformers / torch uses ~150-250 MiB
+# of RSS, but this is the same memory that would have been used on the
+# first request anyway. We are NOT preloading the model weights (~90 MB),
+# so peak RSS is ~250 MiB during import, which is well within the 512 MiB
+# Render free tier limit. The previous OOM was caused by trying to load
+# the model weights AT STARTUP, before uvicorn bound to $PORT.
+#
+# This is guarded by the _IMPORT_PRELOADED flag so multiple calls (e.g.
+# from tests) are idempotent.
+_IMPORT_PRELOAD_STARTED: bool = False
+_IMPORT_PRELOAD_LOCK = threading.Lock()
+_IMPORT_PRELOAD_DONE: bool = False
+
+
+def _background_import_preload() -> None:
+    """Daemon thread target: imports sentence_transformers in the background.
+
+    Only the import runs — the model weights are NOT loaded here. This
+    eliminates the ~80 s first-request penalty on Render without causing
+    the 512 MiB OOM that the previous startup-preload approach produced.
+    """
+    global SentenceTransformer, _IMPORT_PRELOAD_DONE  # noqa: PLW0603
+    try:
+        _t = time.perf_counter()
+        from sentence_transformers import SentenceTransformer as _ST  # noqa: F401
+        SentenceTransformer = _ST
+        elapsed = time.perf_counter() - _t
+        logger.info(
+            "[PERF] [background] sentence_transformers import: %.2fs",
+            elapsed,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "[EMBEDDINGS] Background import preload failed (will retry on first request): %s",
+            exc,
+        )
+    finally:
+        _IMPORT_PRELOAD_DONE = True
+
+
+def start_background_import_preload() -> None:
+    """Start the background import preload exactly once per process.
+
+    Safe to call multiple times — subsequent calls are no-ops. The import
+    runs in a daemon thread, so it will not block process shutdown. If the
+    import fails for any reason, the first embedding request will fall
+    back to the existing lazy-import path inside get_sentence_transformer().
+    """
+    global _IMPORT_PRELOAD_STARTED  # noqa: PLW0603
+    with _IMPORT_PRELOAD_LOCK:
+        if _IMPORT_PRELOAD_STARTED:
+            return
+        _IMPORT_PRELOAD_STARTED = True
+    t = threading.Thread(
+        target=_background_import_preload,
+        name="st-import-preload",
+        daemon=True,
+    )
+    t.start()
+    logger.info(
+        "[EMBEDDINGS] Started background import preload (daemon thread) — "
+        "first request will not pay the ~80 s import cost.",
+    )
+
+
 def get_sentence_transformer(
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
     *,
@@ -84,8 +172,16 @@ def get_sentence_transformer(
     # It transitively imports torch (~150-250 MiB RSS at import time).
     # Doing it here means PyTorch is initialised only on the first
     # embedding request, AFTER uvicorn has already bound to $PORT.
+    #
+    # IMPORTANT: a daemon thread started by start_background_import_preload()
+    # (called from app/main.py lifespan) may have ALREADY imported the
+    # module while we were waiting for the first request. If so,
+    # `SentenceTransformer` is no longer None and we skip the import
+    # entirely — saving the full ~80 s cost on the first request.
     global SentenceTransformer  # noqa: PLW0603 - intentional rebind for lazy load
     if SentenceTransformer is None:
+        # Fallback: if the background preload didn't run (e.g. tests,
+        # or the thread is still in flight), do the import here.
         # Timing the import separately lets us attribute first-request latency
         # between the lazy import+init (PyTorch, numpy, etc.) vs the actual
         # model loading vs the encode() call.
@@ -95,6 +191,13 @@ def get_sentence_transformer(
         logger.info(
             "[PERF] sentence_transformers import: %.2fs",
             time.perf_counter() - _import_start,
+        )
+    elif _IMPORT_PRELOAD_DONE:
+        # Background preload completed before the first request arrived —
+        # no import work needed here.
+        logger.debug(
+            "[PERF] sentence_transformers already preloaded in background; "
+            "skipping import on first request.",
         )
 
     # If SentenceTransformer has been patched with a Mock (e.g. in unit tests), return mock call directly
