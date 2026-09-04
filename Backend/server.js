@@ -56,7 +56,8 @@ const defaultOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
   "http://localhost:3000",
-  "https://edunovaai.onrender.com"
+  "https://edunovaai.onrender.com",
+  "https://edunova-ai-delta.vercel.app"
 ];
 
 const allowedOrigins = [
@@ -92,19 +93,11 @@ const corsOptions = {
     );
   },
 
-  methods: [
-    "GET",
-    "POST",
-    "PUT",
-    "PATCH",
-    "DELETE",
-    "OPTIONS"
-  ],
-
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization"
-  ],
+  // Note: when `credentials: true` is set, `origin` MUST be an explicit
+  // allow-list (not "*") — which is already enforced by the origin callback.
+  // Using "*" for methods/headers is safe with an explicit origin list.
+  methods: "*",
+  allowedHeaders: "*",
 
   credentials: true,
 
