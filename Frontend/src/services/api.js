@@ -153,7 +153,7 @@ export const aiApi = {
 // TEACHER CHAT API
 // ============================================================================
 export const teacherApi = {
-  ask: (payload) => request('/teacher/ask', { method: 'POST', body: JSON.stringify(payload) }),
+  ask: (payload) => request('/ai/chat', { method: 'POST', body: JSON.stringify(payload) }),
 };
 
 // ============================================================================

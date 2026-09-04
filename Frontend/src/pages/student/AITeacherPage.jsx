@@ -52,10 +52,13 @@ export default function AITeacherPage() {
     try {
       const { teacherApi } = await import('../../services/api');
       const result = await teacherApi.ask({
-        question: userText,
+        message: userText,
+        topic: currentTopic,
+        tutorMode: activeTutorMode,
+        history: messages.map((m) => ({ sender: m.sender, text: m.text })),
         level: 'beginner'
       });
-      const reply = result?.answer || result?.data?.answer;
+      const reply = result?.message?.text || result?.data?.message?.text;
       if (reply) setMessages((prev) => [...prev, { sender: 'ai', text: reply }]);
       setShowExplainDifferently(false);
     } catch (error) {
