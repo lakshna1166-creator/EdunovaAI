@@ -630,46 +630,49 @@ def get_onnx_session() -> tuple[Any, Any]:
         # Force-flush so we can see if the InferenceSession constructor
         # hangs before being killed by OOM in the 512 MiB Render tier.
         # ----------------------------------------------------------------
+        rss_before_session = _read_rss_mib()
         logger.info(
-            "[EMBEDDINGS] STEP 5: creating InferenceSession | model=%s | "
-            "optimization=ORT_ENABLE_BASIC | providers=[CPUExecutionProvider]",
-            model_path.name,
+            "[EMBEDDINGS] SESSION STEP START: creating InferenceSession | "
+            "model=%s | rss_before=%s MiB",
+            model_path,
+            rss_before_session,
         )
         _force_log_flush()
+        monotonic_start = time.monotonic()
         step_start = time.perf_counter()
         try:
-            logger.info(
-                "[EMBEDDINGS] STEP 5: calling InferenceSession() constructor | "
-                "elapsed=%.2fs",
-                time.perf_counter() - step_start,
-            )
-            _force_log_flush()
             session = _ORT_MODULE.InferenceSession(
                 str(model_path),
                 sess_options=so,
                 providers=["CPUExecutionProvider"],
             )
-            inf_session_done = time.perf_counter()
-            logger.info(
-                "[EMBEDDINGS] STEP 5: InferenceSession() constructor RETURNED | "
-                "elapsed=%.2fs",
-                inf_session_done - step_start,
-            )
         except Exception as exc:
             logger.exception(
-                "[EMBEDDINGS] STEP 5 FAILED | error_type=%s | error=%s | "
-                "elapsed=%.2fs",
+                "[EMBEDDINGS] SESSION STEP FAILED | error_type=%s | error=%s | "
+                "elapsed=%.2fs | rss_after=%s MiB",
                 type(exc).__name__,
                 exc,
                 time.perf_counter() - step_start,
+                _read_rss_mib(),
             )
+            _force_log_flush()
             raise
+        elapsed = time.monotonic() - monotonic_start
+        rss_after_session = _read_rss_mib()
+        session_providers = session.get_providers()
+        input_names = [m.name for m in session.get_inputs()]
+        output_names = [m.name for m in session.get_outputs()]
         logger.info(
-            "[EMBEDDINGS] STEP 5 DONE | session created | elapsed=%.2fs | "
-            "active_providers=%s",
-            time.perf_counter() - step_start,
-            session.get_providers(),
+            "[EMBEDDINGS] SESSION STEP DONE: InferenceSession created | "
+            "elapsed=%.2fs | rss_after=%s MiB | input_names=%s | "
+            "output_names=%s | execution_providers=%s",
+            elapsed,
+            rss_after_session,
+            input_names,
+            output_names,
+            session_providers,
         )
+        _force_log_flush()
 
         # Discover I/O names from the model graph.
         input_meta = {meta.name: meta for meta in session.get_inputs()}
@@ -703,36 +706,40 @@ def get_onnx_session() -> tuple[Any, Any]:
         )
 
         # ----------------------------------------------------------------
-        # STEP 6: load tokenizer
+        # STEP 6: load tokenizer (SEPARATE from InferenceSession)
         # ----------------------------------------------------------------
-        logger.info("[EMBEDDINGS] STEP 6: creating tokenizer")
+        rss_before_tok = _read_rss_mib()
+        logger.info(
+            "[EMBEDDINGS] TOKENIZER STEP START | rss_before=%s MiB",
+            rss_before_tok,
+        )
         _force_log_flush()
-        step_start = time.perf_counter()
+        tok_start = time.perf_counter()
         try:
-            logger.info(
-                "[EMBEDDINGS] STEP 6: calling Tokenizer.from_file() | "
-                "elapsed=%.2fs",
-                time.perf_counter() - step_start,
-            )
-            _force_log_flush()
             tokenizer = _TOKENIZERS_MODULE.Tokenizer.from_file(
                 str(tokenizer_path)
             )
-            tok_done = time.perf_counter()
-            logger.info(
-                "[EMBEDDINGS] STEP 6: Tokenizer.from_file() RETURNED | "
-                "elapsed=%.2fs",
-                tok_done - step_start,
-            )
         except Exception as exc:
             logger.exception(
-                "[EMBEDDINGS] STEP 6 FAILED | error_type=%s | error=%s | "
-                "elapsed=%.2fs",
+                "[EMBEDDINGS] TOKENIZER STEP FAILED | error_type=%s | error=%s | "
+                "elapsed=%.2fs | rss_after=%s MiB",
                 type(exc).__name__,
                 exc,
-                time.perf_counter() - step_start,
+                time.perf_counter() - tok_start,
+                _read_rss_mib(),
             )
+            _force_log_flush()
             raise
+        tok_elapsed = time.perf_counter() - tok_start
+        rss_after_tok = _read_rss_mib()
+        logger.info(
+            "[EMBEDDINGS] TOKENIZER STEP DONE | elapsed=%.2fs | "
+            "rss_after=%s MiB",
+            tok_elapsed,
+            rss_after_tok,
+        )
+        _force_log_flush()
+
         # Enable padding/truncation suitable for MiniLM (max 256 tokens is
         # well above any realistic chunk size for RAG; reduces memory).
         tokenizer.enable_padding(
@@ -741,22 +748,79 @@ def get_onnx_session() -> tuple[Any, Any]:
             length=256,
         )
         tokenizer.enable_truncation(max_length=256)
-        logger.info(
-            "[EMBEDDINGS] STEP 6 DONE | tokenizer ready | elapsed=%.2fs",
-            time.perf_counter() - step_start,
-        )
 
         # ----------------------------------------------------------------
-        # STEP 7: commit module-level state
+        # STEP 7: test embedding diagnostic with "what is AI?"
+        # This verifies the session + tokenizer work without blocking
+        # the health endpoint or calling Gemini/Supabase.
         # ----------------------------------------------------------------
-        logger.info("[EMBEDDINGS] STEP 7: marking session loaded")
+        rss_before_test = _read_rss_mib()
+        logger.info(
+            "[EMBEDDINGS] EMBED TEST START | test_input='what is AI?' | "
+            "rss_before=%s MiB",
+            rss_before_test,
+        )
+        _force_log_flush()
+        test_start = time.perf_counter()
+        import numpy as _np  # noqa: PLC0415 - local import for test
+        try:
+            test_encodings = tokenizer.encode_batch(["what is AI?"])
+            enc = test_encodings[0]
+            test_input_ids = _np.array(enc.ids, dtype=_np.int64)
+            test_attention_mask = _np.array(enc.attention_mask, dtype=_np.int64)
+            test_token_type_ids = _np.zeros(len(enc.ids), dtype=_np.int64)
+            if getattr(enc, "type_ids", None):
+                test_token_type_ids = _np.array(enc.type_ids, dtype=_np.int64)
+
+            test_feed: dict[str, Any] = {_INPUT_IDS_NAME: test_input_ids[None, :]}
+            if _ATTENTION_MASK_NAME:
+                test_feed[_ATTENTION_MASK_NAME] = test_attention_mask[None, :]
+            if _TOKEN_TYPE_IDS_NAME:
+                test_feed[_TOKEN_TYPE_IDS_NAME] = test_token_type_ids[None, :]
+
+            test_outputs = session.run([_OUTPUT_NAME], test_feed)
+            test_embedding = test_outputs[0]
+            test_dim = test_embedding.shape[-1]
+        except Exception as exc:
+            logger.exception(
+                "[EMBEDDINGS] EMBED TEST FAILED | error_type=%s | error=%s | "
+                "elapsed=%.2fs | rss_after=%s MiB",
+                type(exc).__name__,
+                exc,
+                time.perf_counter() - test_start,
+                _read_rss_mib(),
+            )
+            _force_log_flush()
+            raise
+        test_elapsed = time.perf_counter() - test_start
+        rss_after_test = _read_rss_mib()
+        logger.info(
+            "[EMBEDDINGS] EMBED TEST DONE | test_input='what is AI?' | "
+            "embedding_dimension=%d | elapsed=%.2fs | rss_after=%s MiB",
+            test_dim,
+            test_elapsed,
+            rss_after_test,
+        )
+        _force_log_flush()
+
+        # Verify expected dimension is 384
+        if test_dim != 384:
+            raise RuntimeError(
+                f"Test embedding dimension mismatch: expected 384, got {test_dim}. "
+                "Check that the ONNX model is all-MiniLM-L6-v2-onnx."
+            )
+
+        # ----------------------------------------------------------------
+        # STEP 8: commit module-level state
+        # ----------------------------------------------------------------
+        logger.info("[EMBEDDINGS] STEP 8: marking session loaded")
         _ORT_SESSION = session
         _TOKENIZER = tokenizer
         _MODEL_DIR = model_dir
         _SESSION_LOADED = True
         _TOKENIZER_LOADED = True
         logger.info(
-            "[EMBEDDINGS] STEP 7 DONE | rss_after=%s MiB",
+            "[EMBEDDINGS] STEP 8 DONE | rss_after=%s MiB",
             _read_rss_mib(),
         )
         _force_log_flush()
