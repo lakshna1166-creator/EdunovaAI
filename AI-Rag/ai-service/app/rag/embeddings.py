@@ -195,14 +195,10 @@ def get_onnx_session() -> tuple[Any, Any]:
             be located.
         RuntimeError: if the ONNX session fails to initialise.
     """
-    logger.info(
-        "[EMBEDDINGS] get_onnx_session() entered | session_loaded=%s | "
-        "tokenizer_loaded=%s | thread=%s",
-        _SESSION_LOADED,
-        _TOKENIZER_LOADED,
-        threading.current_thread().name,
-        flush=True,
-    )
+    # All `global` declarations must appear before ANY reference (read or
+    # write) to those names inside the function body per PEP 3124 / Python
+    # scoping rules. The diagnostic log line below reads _SESSION_LOADED and
+    # _TOKENIZER_LOADED, so the globals must be declared first.
     global _ORT_SESSION  # noqa: PLW0603 - intentional module-level state
     global _TOKENIZER
     global _MODEL_DIR
@@ -212,6 +208,15 @@ def get_onnx_session() -> tuple[Any, Any]:
     global _ATTENTION_MASK_NAME
     global _TOKEN_TYPE_IDS_NAME
     global _OUTPUT_NAME
+
+    logger.info(
+        "[EMBEDDINGS] get_onnx_session() entered | session_loaded=%s | "
+        "tokenizer_loaded=%s | thread=%s",
+        _SESSION_LOADED,
+        _TOKENIZER_LOADED,
+        threading.current_thread().name,
+        flush=True,
+    )
 
     if _SESSION_LOADED and _TOKENIZER_LOADED:
         return _ORT_SESSION, _TOKENIZER
