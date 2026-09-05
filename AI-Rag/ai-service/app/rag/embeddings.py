@@ -125,7 +125,7 @@ _ONNX_THREADS = int(os.getenv("ONNX_THREADS", "1"))
 # `initialize_onnxruntime_diagnostics()`, called from the FastAPI lifespan.
 # The request path checks `_ORT_IMPORT_ERROR` and raises immediately if the
 # startup import failed — it NEVER re-attempts the import on the hot path.
-_RUNTIME_LOCK = threading.Lock()
+_RUNTIME_LOCK = threading.RLock()
 _ORT_IMPORTED = False
 _ORT_IMPORT_ERROR: str | None = None  # set if `import onnxruntime` fails at startup
 _TOKENIZERS_IMPORTED = False

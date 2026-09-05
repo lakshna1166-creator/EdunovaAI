@@ -6,6 +6,7 @@ import { askRAG } from "../services/ragService.js";
  * POST /api/ai/chat
  */
 export const socraticChat = async (req, res, next) => {
+  console.log("[AI CHAT] Request received");
   try {
     const {
       message,
@@ -100,8 +101,7 @@ export const socraticChat = async (req, res, next) => {
     const isLocalhostProduction = errorMessage.includes("localhost") && errorMessage.includes("production");
 
     console.error(
-      "AI-RAG connection error:",
-      errorMessage
+      `[AI CHAT] Error: status ${statusCode} - ${clientMessage} - ${errorMessage}`
     );
 
     // Return a descriptive message so the browser/client knows why it failed.
