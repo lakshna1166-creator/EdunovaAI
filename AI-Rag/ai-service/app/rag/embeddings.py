@@ -441,42 +441,42 @@ def _ensure_tokenizers_imported() -> None:
     with _RUNTIME_LOCK:
         if _TOKENIZERS_IMPORTED:
             return
+        rss_before = _read_rss_mib()
         logger.info(
-            "[EMBEDDINGS] _ensure_tokenizers_imported() ENTER | "
-            "thread=%s | rss_before=%s MiB",
-            threading.current_thread().name,
-            _read_rss_mib(),
+            "[EMBEDDINGS] STEP 3 START: importing tokenizers | "
+            "rss_before=%s MiB",
+            rss_before,
         )
         _force_log_flush()
-        import_start = time.perf_counter()
+        monotonic_start = time.monotonic()
+        perf_start = time.perf_counter()
         try:
-            logger.info(
-                "[EMBEDDINGS] _ensure_tokenizers_imported() performing 'import tokenizers' | "
-                "thread=%s | elapsed=%.2fs",
-                threading.current_thread().name,
-                time.perf_counter() - import_start,
-            )
-            _force_log_flush()
             import tokenizers as _tok  # noqa: F401 - imported lazily
         except Exception as exc:
             logger.exception(
-                "[EMBEDDINGS] _ensure_tokenizers_imported() FAILED | "
-                "error_type=%s | error=%s | elapsed=%.2fs",
+                "[EMBEDDINGS] STEP 3 FAILED: tokenizers import raised | "
+                "error_type=%s | error=%s | elapsed=%.2fs | rss_after=%s MiB",
                 type(exc).__name__,
                 exc,
-                time.perf_counter() - import_start,
+                time.perf_counter() - perf_start,
+                _read_rss_mib(),
             )
+            _force_log_flush()
             raise
+        elapsed = time.monotonic() - monotonic_start
+        rss_after = _read_rss_mib()
+        tok_version = getattr(_tok, "__version__", "unknown")
+        logger.info(
+            "[EMBEDDINGS] STEP 3 DONE: tokenizers imported | "
+            "elapsed=%.2fs | rss_after=%s MiB | tok_version=%s",
+            elapsed,
+            rss_after,
+            tok_version,
+        )
+        _force_log_flush()
         global _TOKENIZERS_MODULE
         _TOKENIZERS_MODULE = _tok
         _TOKENIZERS_IMPORTED = True
-        logger.info(
-            "[EMBEDDINGS] _ensure_tokenizers_imported() DONE | "
-            "elapsed=%.2fs | rss_after=%s MiB | tok_version=%s",
-            time.perf_counter() - import_start,
-            _read_rss_mib(),
-            getattr(_tok, "__version__", "unknown"),
-        )
 
 
 def get_onnx_session() -> tuple[Any, Any]:
