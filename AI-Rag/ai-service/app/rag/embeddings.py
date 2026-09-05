@@ -1107,3 +1107,139 @@ class _LegacyModelWrapper:
         if isinstance(inputs, str):
             inputs = [inputs]
         return _encode_onnx([str(i) for i in inputs])
+
+
+# ---------------------------------------------------------------------------
+# Tokenizers isolated diagnostic
+# ---------------------------------------------------------------------------
+# Isolated diagnostic for `import tokenizers` to determine if the package
+# itself hangs under Python 3.14 when imported in a clean subprocess.
+# This is NOT part of the production pipeline.
+
+import subprocess as _subprocess
+import sys as _sys
+import json as _json
+
+
+def run_tokenizers_diagnostic(timeout_seconds: float = 20.0) -> dict[str, object]:
+    """Run `import tokenizers` in an isolated subprocess with a hard timeout.
+
+    This diagnostic spawns a brand-new Python interpreter with NO inherited
+    import state from the parent application. It tests whether
+    `tokenizers==0.21.0` itself hangs under Python 3.14 when imported
+    in isolation.
+
+    Args:
+        timeout_seconds: Hard timeout for the subprocess. Default 20s.
+
+    Returns:
+        Dict containing:
+        - status: "SUCCESS" | "TIMEOUT" | "FAILED"
+        - python_version: str
+        - elapsed_seconds: float (or null on failure to start)
+        - tokenizers_version: str | null
+        - stdout: str
+        - stderr: str
+        - exception: str | null
+    """
+    import time as _time
+
+    script = "; ".join([
+        "import sys",
+        "print(f'PYTHON_VERSION:{sys.version.split()[0]}')",
+        "import tokenizers",
+        "print(f'TOKENIZERS_VERSION:{tokenizers.__version__}')",
+    ])
+
+    logger.info("[TOKENIZERS_DIAG] START")
+    logger.info("[TOKENIZERS_DIAG] Python=%s", _sys.version.split()[0])
+    logger.info("[TOKENIZERS_DIAG] Importing tokenizers in isolated subprocess")
+
+    start = _time.perf_counter()
+
+    try:
+        result = _subprocess.run(
+            [_sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            cwd=str(_PROJECT_ROOT),
+        )
+        elapsed = _time.perf_counter() - start
+
+        stdout = result.stdout
+        stderr = result.stderr
+        exit_code = result.returncode
+
+        python_version = "unknown"
+        tokenizers_version = None
+
+        for line in stdout.splitlines():
+            if line.startswith("PYTHON_VERSION:"):
+                python_version = line.split(":", 1)[1]
+            elif line.startswith("TOKENIZERS_VERSION:"):
+                tokenizers_version = line.split(":", 1)[1]
+
+        if exit_code == 0:
+            logger.info(
+                "[TOKENIZERS_DIAG] SUCCESS | elapsed=%.3fs | version=%s",
+                elapsed,
+                tokenizers_version or "unknown",
+            )
+            return {
+                "status": "SUCCESS",
+                "python_version": python_version,
+                "elapsed_seconds": round(elapsed, 3),
+                "tokenizers_version": tokenizers_version,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exception": None,
+            }
+        else:
+            logger.warning(
+                "[TOKENIZERS_DIAG] FAILED | exit_code=%d | elapsed=%.3fs",
+                exit_code,
+                elapsed,
+            )
+            logger.warning("[TOKENIZERS_DIAG] stderr: %s", stderr[:500])
+            return {
+                "status": "FAILED",
+                "python_version": python_version,
+                "elapsed_seconds": round(elapsed, 3),
+                "tokenizers_version": None,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exception": f"subprocess exit code {exit_code}",
+            }
+
+    except _subprocess.TimeoutExpired:
+        elapsed = _time.perf_counter() - start
+        logger.error(
+            "[TOKENIZERS_DIAG] TIMEOUT | elapsed=%.1fs (hard limit)",
+            elapsed,
+        )
+        return {
+            "status": "TIMEOUT",
+            "python_version": _sys.version.split()[0],
+            "elapsed_seconds": round(elapsed, 3),
+            "tokenizers_version": None,
+            "stdout": "",
+            "stderr": f"Timed out after {timeout_seconds}s",
+            "exception": "TIMEOUT",
+        }
+    except Exception as exc:  # noqa: BLE001
+        elapsed = _time.perf_counter() - start
+        logger.error(
+            "[TOKENIZERS_DIAG] FAILED | exception=%s | elapsed=%.3fs",
+            exc,
+            elapsed,
+        )
+        return {
+            "status": "FAILED",
+            "python_version": _sys.version.split()[0],
+            "elapsed_seconds": round(elapsed, 3),
+            "tokenizers_version": None,
+            "stdout": "",
+            "stderr": str(exc),
+            "exception": f"{type(exc).__name__}: {exc}",
+        }

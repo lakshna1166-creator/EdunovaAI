@@ -37,6 +37,7 @@ from app.rag.embeddings import (
     is_onnxruntime_failed,
     get_onnxruntime_error,
     preload_embedding_model,
+    run_tokenizers_diagnostic,
 )
 
 logging.basicConfig(
@@ -197,3 +198,28 @@ def diagnostics_onnx() -> dict[str, object]:
     if failed:
         payload["error"] = get_onnxruntime_error()
     return payload
+
+
+@app.get("/diagnostics/tokenizers")
+def diagnostics_tokenizers() -> dict[str, object]:
+    """Isolated diagnostic for `import tokenizers`.
+
+    This endpoint spawns a brand-new Python subprocess that runs ONLY
+    `import tokenizers` with a hard 20-second timeout. It does NOT
+    inherit the application import state. It is safe to call on a
+    running service — it will not block the FastAPI event loop.
+
+    The endpoint is intended to determine whether `tokenizers==0.21.0`
+    itself hangs under Python 3.14 when imported in a clean process.
+
+    Returns:
+        Dict containing:
+        - status: "SUCCESS" | "TIMEOUT" | "FAILED"
+        - python_version: str
+        - elapsed_seconds: float
+        - tokenizers_version: str | null
+        - stdout: str
+        - stderr: str
+        - exception: str | null
+    """
+    return run_tokenizers_diagnostic(timeout_seconds=20.0)
