@@ -231,11 +231,13 @@ def get_onnx_session() -> tuple[Any, Any]:
         _ensure_tokenizers_imported()
 
         # --- ONNX Runtime session ---
+        logger.info("[EMBEDDINGS] Creating ONNX InferenceSession...")
+        logger.info("[EMBEDDINGS] Model path: %s", model_path)
         load_start = time.perf_counter()
         so = _ORT_MODULE.SessionOptions()
-        so.intra_op_num_threads = _ONNX_THREADS
+        so.intra_op_num_threads = 1
         so.inter_op_num_threads = 1
-        so.graph_optimization_level = _ORT_MODULE.GraphOptimizationLevel.ORT_ENABLE_ALL
+        so.graph_optimization_level = _ORT_MODULE.GraphOptimizationLevel.ORT_ENABLE_BASIC
         try:
             session = _ORT_MODULE.InferenceSession(
                 str(model_path),
@@ -249,10 +251,13 @@ def get_onnx_session() -> tuple[Any, Any]:
             ) from exc
         load_time = time.perf_counter() - load_start
         logger.info(
-            "[EMBEDDINGS] ONNX session ready | model=%s | threads=%d | "
+            "[EMBEDDINGS] ONNX InferenceSession created successfully | elapsed=%.2fs",
+            load_time,
+        )
+        logger.info(
+            "[EMBEDDINGS] ONNX session ready | model=%s | threads=1 | "
             "load=%.2fs",
             model_path.name,
-            _ONNX_THREADS,
             load_time,
         )
 
