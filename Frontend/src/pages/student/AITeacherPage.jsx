@@ -1,14 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Bot,
   User,
   Send,
   AlertTriangle,
   ArrowRight,
-  Zap,
   Award,
+  Zap,
   Sparkles,
-  RefreshCw
+  RefreshCw,
+  Speaker
 } from 'lucide-react';
 import StudentNavbar from '../../components/student/StudentNavbar';
 import PageHeader from '../../components/common/PageHeader';
@@ -18,7 +19,7 @@ import MisconceptionRadar from '../../components/innovative/MisconceptionRadar';
 import ExplainDifferently from '../../components/innovative/ExplainDifferently';
 
 import { useAuth } from '../../context/AuthContext';
-import { analyticsApi } from '../../services/api';
+import { analyticsApi, voiceApi } from '../../services/api';
 
 export default function AITeacherPage() {
   const { user } = useAuth();
@@ -63,6 +64,28 @@ export default function AITeacherPage() {
       setShowExplainDifferently(false);
     } catch (error) {
       setMessages((prev) => [...prev, { sender: 'ai', text: 'I could not process that question yet. Please try again.' }]);
+    }
+  };
+
+  // Text-to-Speech function
+  const speakText = async (text) => {
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      console.error('Invalid text for speech:', text);
+      return;
+    }
+
+    try {
+      const audioBlob = await voiceApi.speak(text.trim());
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
+      await audio.play();
+      // Clean up object URL after playback
+      audio.addEventListener('ended', () => {
+        URL.revokeObjectURL(audioUrl);
+      });
+    } catch (error) {
+      console.error('Text-to-speech error:', error);
+      // Optionally show a toast notification to the user
     }
   };
 
@@ -175,6 +198,24 @@ export default function AITeacherPage() {
                     )}
 
                     <p style={{ margin: 0 }}>{msg.text}</p>
+                    {msg.sender === 'ai' && (
+                      <button
+                        style={{
+                          marginLeft: '8px',
+                          background: 'transparent',
+                          border: 'none',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          display: 'inline-flex',
+                          verticalAlign: 'middle',
+                        }}
+                        onClick={() => speakText(msg.text)}
+                        title="Speak this response"
+                        aria-label="Speak AI response"
+                      >
+                        <Speaker size={14} color="#64748B" />
+                      </button>
+                    )}
 
                     {msg.remediation && (
                       <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid #FECDD3', fontSize: '0.85rem', color: '#166534', fontWeight: 500 }}>

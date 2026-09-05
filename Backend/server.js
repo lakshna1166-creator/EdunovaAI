@@ -19,6 +19,7 @@ import studentRoutes from "./routes/studentRoutes.js";
 import aiRoutes from "./routes/aiRoutes.js";
 import quizRoutes from "./routes/quizRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
+import voiceRoutes from "./routes/voiceRoutes.js";
 
 // Middlewares & UI
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
@@ -212,6 +213,7 @@ app.use("/api/recommendations", studentRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/quiz", quizRoutes);
 app.use("/api/analytics", analyticsRoutes);
+app.use("/api/voice", voiceRoutes);
 
 // ============================================================================
 // ERROR HANDLING (404 and Central Error Sanitizer)
