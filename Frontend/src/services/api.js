@@ -165,6 +165,47 @@ export const quizApi = {
 };
 
 // ============================================================================
+// VOICE / TEXT-TO-SPEECH API
+// ============================================================================
+export const voiceApi = {
+  /**
+   * Send text to the backend TTS endpoint and return an audio Blob.
+   * Uses fetch directly to handle binary response (audio/mpeg).
+   *
+   * @param {string} text - The text to convert to speech
+   * @returns {Promise<Blob>} - Audio blob from ElevenLabs
+   */
+  speak: async (text) => {
+    const url = `${API_BASE_URL}/voice/speak`;
+    const token = getToken();
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token && { Authorization: `Bearer ${token}` })
+      },
+      body: JSON.stringify({ text })
+    });
+
+    if (!response.ok) {
+      let message = `TTS request failed with status ${response.status}`;
+      try {
+        const errData = await response.json();
+        message = errData.message || message;
+      } catch {
+        // Response is not JSON — use status text
+        message = response.statusText || message;
+      }
+      throw new Error(message);
+    }
+
+    const contentType = response.headers.get('Content-Type') || 'audio/mpeg';
+    return new Blob([await response.arrayBuffer()], { type: contentType });
+  }
+};
+
+// ============================================================================
 // ANALYTICS API
 // ============================================================================
 export const analyticsApi = {
@@ -177,5 +218,6 @@ export default {
   student: studentApi,
   ai: aiApi,
   quiz: quizApi,
+  voice: voiceApi,
   analytics: analyticsApi
 };
