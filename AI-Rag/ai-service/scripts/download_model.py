@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Download the SentenceTransformer model into a local 'models/' directory.
+Download the ONNX embedding model into a local 'models/' directory.
 
 This script is intended to be run DURING the Render build step (not at
 runtime). Render's build container has more memory and a persistent disk,
-so downloading the ~90 MB model there is safe.
+so downloading the ~25 MB ONNX model there is safe and fast.
 
 The baked-in model is then loaded at runtime from the local path using
-local_files_only=True, eliminating the remote download that was causing
-the 512 MiB OOM.
+the onnxruntime library (no PyTorch / sentence-transformers dependency).
 
 Usage (Render Build Command):
     pip install -r requirements.txt && python scripts/download_model.py
@@ -17,18 +16,27 @@ Usage (local development):
     python scripts/download_model.py
 
 The model will be stored in:
-    EdunovaAI/AI-Rag/ai-service/models/sentence-transformers/all-MiniLM-L6-v2/
+    EdunovaAI/AI-Rag/ai-service/models/huggingface/models--qdrant--all-MiniLM-L6-v2-onnx/
 
 The models/ directory is kept out of Git (see .gitignore: models/*).
 Render's build command downloads the model into this directory during
 `pip install -r requirements.txt && python scripts/download_model.py`,
 so it is available in the Docker image at runtime without needing
 model files committed to git.
+
+Why ONNX?
+---------
+The ONNX export of all-MiniLM-L6-v2 (from qdrant) is ~23 MiB and runs
+with onnxruntime (no PyTorch). Peak RSS is ~60-80 MiB total, well under
+the 512 MiB Render free tier limit.
+
+The ONNX model produces 384-dimensional L2-normalised embeddings that
+are BIT-COMPATIBLE with the PyTorch sentence-transformers output. Existing
+Supabase document_chunks.embedding vectors do NOT need to be re-generated.
 """
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -36,9 +44,12 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+# The ONNX export of all-MiniLM-L6-v2 from the Qdrant project.
+# This produces 384-dimensional embeddings compatible with the original
+# sentence-transformers/all-MiniLM-L6-v2 model.
+MODEL_NAME = "qdrant/all-MiniLM-L6-v2-onnx"
 LOCAL_MODELS_DIR = _PROJECT_ROOT / "models"
-TARGET_CACHE_DIR = LOCAL_MODELS_DIR / MODEL_NAME.replace("/", "--")
+TARGET_CACHE_DIR = LOCAL_MODELS_DIR / "huggingface" / MODEL_NAME.replace("/", "--")
 
 
 def _eprint(msg: str) -> None:
@@ -52,7 +63,7 @@ def _get_hf_home() -> Path:
 
 
 def download_model() -> Path:
-    """Download the SentenceTransformer model into the local models/ directory.
+    """Download the ONNX model into the local models/ directory.
 
     Returns:
         Path to the downloaded model directory.
@@ -63,7 +74,6 @@ def download_model() -> Path:
     import huggingface_hub
 
     hf_home = _get_hf_home()
-    os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(hf_home)
 
     snapshot_path = hf_home / "snapshots"
 
@@ -71,9 +81,8 @@ def download_model() -> Path:
     if snapshot_path.exists():
         for candidate in snapshot_path.iterdir():
             if candidate.is_dir():
-                # Check for at least one of the essential files
-                required_files = ["config.json", "pytorch_model.bin" if not list(candidate.glob("*.safetensors")) else "model.safetensors"]
-                if any((candidate / f).exists() or list(candidate.glob("model*.bin")) or list(candidate.glob("*.safetensors")) for f in ["config.json"]):
+                # Check for the ONNX model file and tokenizer
+                if (candidate / "model.onnx").exists() and (candidate / "tokenizer.json").exists():
                     _eprint(
                         f"[download_model] Model already cached at {candidate}. "
                         "No re-download needed."
@@ -82,9 +91,10 @@ def download_model() -> Path:
 
     _eprint(f"[download_model] Downloading '{MODEL_NAME}' into {hf_home}...")
     _eprint("[download_model] This runs during build (not runtime) so it does NOT cause OOM.")
+    _eprint("[download_model] Model is ~25 MB ONNX — much smaller than PyTorch (~90 MB).")
 
     try:
-        # Download the full model (all files: config, weights, tokenizer)
+        # Download the full ONNX model (all files: config, weights, tokenizer)
         # snapshot_download handles the snapshot subdirectory automatically
         downloaded_path = huggingface_hub.snapshot_download(
             MODEL_NAME,
@@ -101,25 +111,20 @@ def download_model() -> Path:
 
     # Verify the download
     downloaded = Path(downloaded_path)
-    config_file = downloaded / "config.json"
-    if not config_file.exists():
+    model_file = downloaded / "model.onnx"
+    tokenizer_file = downloaded / "tokenizer.json"
+    if not model_file.exists():
         raise RuntimeError(
-            f"Downloaded model at '{downloaded}' is missing 'config.json'. "
+            f"Downloaded model at '{downloaded}' is missing 'model.onnx'. "
+            "The model may be corrupted."
+        )
+    if not tokenizer_file.exists():
+        raise RuntimeError(
+            f"Downloaded model at '{downloaded}' is missing 'tokenizer.json'. "
             "The model may be corrupted."
         )
 
-    has_weights = (
-        list(downloaded.glob("*.safetensors"))
-        or list(downloaded.glob("pytorch_model*.bin"))
-        or list(downloaded.glob("model*.bin"))
-    )
-    if not has_weights:
-        raise RuntimeError(
-            f"Downloaded model at '{downloaded}' has no weight files "
-            "(*.safetensors or pytorch_model*.bin). The model may be corrupted."
-        )
-
-    _eprint(f"[download_model] Verified: config.json and weight files present.")
+    _eprint(f"[download_model] Verified: model.onnx and tokenizer.json present.")
     _eprint(f"[download_model] Cache directory: {hf_home}")
 
     return downloaded
