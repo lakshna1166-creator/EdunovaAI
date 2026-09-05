@@ -54,6 +54,36 @@ from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
 
+
+def _force_log_flush() -> None:
+    """Force-flush all handlers attached to this logger and its ancestors.
+
+    Python's stdlib ``Logger._log()`` does NOT accept a ``flush`` keyword
+    argument. To guarantee that an ``info()`` line is written to the
+    underlying stream *before* a potentially blocking operation (such as
+    the first ``import onnxruntime``), we must invoke ``StreamHandler.flush()``
+    directly. This is the only safe way to get log-on-disk visibility on
+    a Render free-tier instance that may be OOM-killed during the very
+    operation we are trying to observe.
+    """
+    try:
+        for handler in logger.handlers:
+            try:
+                handler.flush()
+            except Exception:  # pragma: no cover - defensive
+                pass
+        # Also walk up the logger hierarchy so root-level handlers are flushed.
+        current = logger.parent
+        while current is not None:
+            for handler in current.handlers:
+                try:
+                    handler.flush()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            current = current.parent
+    except Exception:  # pragma: no cover - never let logging crash the app
+        pass
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -187,21 +217,36 @@ def _ensure_onnxruntime_imported() -> None:
         # ----------------------------------------------------------------
         # DIAGNOSTIC: bracket the onnxruntime import so we can confirm
         # whether THIS import is the operation that hangs / OOMs in the
-        # 512 MiB Render free tier. No flush=True; uses the existing
-        # logger. Exceptions are NOT swallowed.
+        # 512 MiB Render free tier. Exceptions are NOT swallowed.
+        # Force flush so logs appear to disk before a potential hang/kill.
         # ----------------------------------------------------------------
         logger.info(
-            "[EMBEDDINGS] STEP 2 START: importing onnxruntime | "
+            "[EMBEDDINGS] _ensure_onnxruntime_imported() ENTER | "
             "thread=%s | rss_before=%s MiB",
             threading.current_thread().name,
             _read_rss_mib(),
         )
+        _force_log_flush()
         import_start = time.perf_counter()
         try:
+            logger.info(
+                "[EMBEDDINGS] _ensure_onnxruntime_imported() performing 'import onnxruntime' | "
+                "thread=%s | elapsed=%.2fs",
+                threading.current_thread().name,
+                time.perf_counter() - import_start,
+            )
+            _force_log_flush()
             import onnxruntime as _ort  # noqa: F401 - imported lazily
+            import_done = time.perf_counter()
+            logger.info(
+                "[EMBEDDINGS] _ensure_onnxruntime_imported() 'import onnxruntime' RETURNED | "
+                "thread=%s | import_elapsed=%.2fs",
+                threading.current_thread().name,
+                import_done - import_start,
+            )
         except Exception as exc:
             logger.exception(
-                "[EMBEDDINGS] STEP 2 FAILED: onnxruntime import raised | "
+                "[EMBEDDINGS] _ensure_onnxruntime_imported() FAILED: onnxruntime import raised | "
                 "error_type=%s | error=%s | elapsed=%.2fs | rss_after=%s MiB",
                 type(exc).__name__,
                 exc,
@@ -214,8 +259,8 @@ def _ensure_onnxruntime_imported() -> None:
         _ORT_MODULE = _ort
         _ORT_IMPORTED = True
         logger.info(
-            "[EMBEDDINGS] STEP 2 DONE: onnxruntime imported | "
-            "elapsed=%.2fs | rss_after=%s MiB | ort_version=%s | "
+            "[EMBEDDINGS] _ensure_onnxruntime_imported() DONE | "
+            "total_elapsed=%.2fs | rss_after=%s MiB | ort_version=%s | "
             "available_providers=%s",
             import_elapsed,
             _read_rss_mib(),
@@ -237,10 +282,42 @@ def _ensure_tokenizers_imported() -> None:
     with _RUNTIME_LOCK:
         if _TOKENIZERS_IMPORTED:
             return
-        import tokenizers as _tok  # noqa: F401 - imported lazily
+        logger.info(
+            "[EMBEDDINGS] _ensure_tokenizers_imported() ENTER | "
+            "thread=%s | rss_before=%s MiB",
+            threading.current_thread().name,
+            _read_rss_mib(),
+        )
+        _force_log_flush()
+        import_start = time.perf_counter()
+        try:
+            logger.info(
+                "[EMBEDDINGS] _ensure_tokenizers_imported() performing 'import tokenizers' | "
+                "thread=%s | elapsed=%.2fs",
+                threading.current_thread().name,
+                time.perf_counter() - import_start,
+            )
+            _force_log_flush()
+            import tokenizers as _tok  # noqa: F401 - imported lazily
+        except Exception as exc:
+            logger.exception(
+                "[EMBEDDINGS] _ensure_tokenizers_imported() FAILED | "
+                "error_type=%s | error=%s | elapsed=%.2fs",
+                type(exc).__name__,
+                exc,
+                time.perf_counter() - import_start,
+            )
+            raise
         global _TOKENIZERS_MODULE
         _TOKENIZERS_MODULE = _tok
         _TOKENIZERS_IMPORTED = True
+        logger.info(
+            "[EMBEDDINGS] _ensure_tokenizers_imported() DONE | "
+            "elapsed=%.2fs | rss_after=%s MiB | tok_version=%s",
+            time.perf_counter() - import_start,
+            _read_rss_mib(),
+            getattr(_tok, "__version__", "unknown"),
+        )
 
 
 def get_onnx_session() -> tuple[Any, Any]:
@@ -391,18 +468,33 @@ def get_onnx_session() -> tuple[Any, Any]:
 
         # ----------------------------------------------------------------
         # STEP 5: create ONNX InferenceSession (the suspected bottleneck)
+        # Force-flush so we can see if the InferenceSession constructor
+        # hangs before being killed by OOM in the 512 MiB Render tier.
         # ----------------------------------------------------------------
         logger.info(
             "[EMBEDDINGS] STEP 5: creating InferenceSession | model=%s | "
             "optimization=ORT_ENABLE_BASIC | providers=[CPUExecutionProvider]",
             model_path.name,
         )
+        _force_log_flush()
         step_start = time.perf_counter()
         try:
+            logger.info(
+                "[EMBEDDINGS] STEP 5: calling InferenceSession() constructor | "
+                "elapsed=%.2fs",
+                time.perf_counter() - step_start,
+            )
+            _force_log_flush()
             session = _ORT_MODULE.InferenceSession(
                 str(model_path),
                 sess_options=so,
                 providers=["CPUExecutionProvider"],
+            )
+            inf_session_done = time.perf_counter()
+            logger.info(
+                "[EMBEDDINGS] STEP 5: InferenceSession() constructor RETURNED | "
+                "elapsed=%.2fs",
+                inf_session_done - step_start,
             )
         except Exception as exc:
             logger.exception(
@@ -455,10 +547,23 @@ def get_onnx_session() -> tuple[Any, Any]:
         # STEP 6: load tokenizer
         # ----------------------------------------------------------------
         logger.info("[EMBEDDINGS] STEP 6: creating tokenizer")
+        _force_log_flush()
         step_start = time.perf_counter()
         try:
+            logger.info(
+                "[EMBEDDINGS] STEP 6: calling Tokenizer.from_file() | "
+                "elapsed=%.2fs",
+                time.perf_counter() - step_start,
+            )
+            _force_log_flush()
             tokenizer = _TOKENIZERS_MODULE.Tokenizer.from_file(
                 str(tokenizer_path)
+            )
+            tok_done = time.perf_counter()
+            logger.info(
+                "[EMBEDDINGS] STEP 6: Tokenizer.from_file() RETURNED | "
+                "elapsed=%.2fs",
+                tok_done - step_start,
             )
         except Exception as exc:
             logger.exception(
@@ -491,7 +596,11 @@ def get_onnx_session() -> tuple[Any, Any]:
         _MODEL_DIR = model_dir
         _SESSION_LOADED = True
         _TOKENIZER_LOADED = True
-        logger.info("[EMBEDDINGS] STEP 7 DONE")
+        logger.info(
+            "[EMBEDDINGS] STEP 7 DONE | rss_after=%s MiB",
+            _read_rss_mib(),
+        )
+        _force_log_flush()
 
         return _ORT_SESSION, _TOKENIZER
 
