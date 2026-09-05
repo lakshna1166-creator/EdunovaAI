@@ -1,22 +1,24 @@
 import React, { useState } from 'react';
-import { 
-  BookOpen, 
-  Bot, 
-  ArrowRight, 
-  CheckCircle2, 
-  HelpCircle, 
-  Lightbulb, 
+import {
+  BookOpen,
+  Bot,
+  ArrowRight,
+  CheckCircle2,
+  HelpCircle,
+  Lightbulb,
   Cpu
 } from 'lucide-react';
 import StudentNavbar from '../../components/student/StudentNavbar';
 import PageHeader from '../../components/common/PageHeader';
 import Button from '../../components/common/Button';
 import AILearningPath from '../../components/innovative/AILearningPath';
+import TeacherAnimation from '../../components/innovative/TeacherAnimation';
 import AdaptiveDifficulty from '../../components/innovative/AdaptiveDifficulty';
 
 export default function LessonPage() {
   const [completedCheck, setCompletedCheck] = useState(false);
   const [difficulty, setDifficulty] = useState('medium');
+  const [teacherState, setTeacherState] = useState('idle');
 
   const storedLessonStr = typeof window !== 'undefined' ? sessionStorage.getItem('edunova_current_lesson') : null;
   const storedLesson = storedLessonStr ? JSON.parse(storedLessonStr) : null;
@@ -50,7 +52,13 @@ export default function LessonPage() {
         <div style={{ marginBottom: '24px' }}>
           <AdaptiveDifficulty currentLevel={difficulty} onLevelChange={setDifficulty} />
         </div>
-
+        {/* Compact AI Teacher */}
+        <div style={{ marginBottom: '24px' }}>
+          <TeacherAnimation
+            state={teacherState}
+            compact
+          />
+        </div>
         {/* Lesson Body Content */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
           {/* Section 1: Intuition & Analogies */}
@@ -71,7 +79,7 @@ export default function LessonPage() {
                 💡 Key Principle:
               </div>
               <p style={{ margin: 0, fontSize: '0.9rem', color: '#1E40AF', lineHeight: 1.6 }}>
-                Each layer acts as a function composition \(f_3(f_2(f_1(x)))\). To determine how the first layer weight influences the final loss, we multiply each intermediate rate of change using the <strong>Calculus Chain Rule</strong>.
+                Each layer acts as a function composition f₃(f₂(f₁(x))). To determine how the first layer weight influences the final loss, we multiply each intermediate rate of change using the <strong>Calculus Chain Rule</strong>.
               </p>
             </div>
           </div>
@@ -86,7 +94,7 @@ export default function LessonPage() {
             </div>
 
             <p style={{ color: '#334155', fontSize: '0.96rem', lineHeight: 1.7, marginBottom: '16px' }}>
-              For a 2-layer network with activation \(h = \sigma(W_1 x)\) and output \(\hat{y} = \sigma(W_2 h)\), the gradient of loss \(L\) with respect to weight \(W_1\) is:
+              For a 2-layer network with activation h = σ(W₁x) and output ŷ = σ(W₂h), the gradient of loss L with respect to weight W₁ is:
             </p>
 
             <div
@@ -138,13 +146,15 @@ export default function LessonPage() {
             </div>
 
             <p style={{ color: '#334155', fontSize: '0.95rem', marginBottom: '16px' }}>
-              If a hidden layer's activation slope \(\sigma'(z) \approx 0\) (e.g. saturated sigmoid), what happens to the gradients propagating to earlier layers?
+              If a hidden layer's activation slope σ′(z) ≈ 0 (e.g. saturated sigmoid), what happens to the gradients propagating to earlier layers?
             </p>
-
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
               <button
                 type="button"
-                onClick={() => setCompletedCheck(true)}
+                onClick={() => {
+                  setCompletedCheck(true);
+                  setTeacherState('encouraging');
+                }}
                 style={{
                   padding: '14px 18px',
                   borderRadius: '12px',

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import TeacherAnimation from '../../components/innovative/TeacherAnimation';
 import {
   Bot,
   User,
@@ -38,6 +39,7 @@ export default function AITeacherPage() {
   }, []);
 
   const [messages, setMessages] = useState([]);
+  const [teacherState, setTeacherState] = useState('idle');
   const hasLearningSession = !!storedLesson?.topic;
 
 
@@ -249,30 +251,17 @@ export default function AITeacherPage() {
 
           {/* Right Sidebar: Misconception Radar Widget */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
-            <MisconceptionRadar data={misconceptions} />
-
-            <div className="glass-card" style={{ padding: '20px', background: '#FFFFFF' }}>
-              <div style={{ fontSize: '0.8rem', fontWeight: 800, color: '#64748B', textTransform: 'uppercase', marginBottom: '10px' }}>
-                Active Pedagogical Status
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
-                  <span style={{ color: '#64748B' }}>Active Topic:</span>
-                  <span style={{ color: '#0F172A', fontWeight: 700 }}>{hasLearningSession ? currentTopic : 'Not started'}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
-                  <span style={{ color: '#64748B' }}>Confidence:</span>
-                  <span style={{ color: '#64748B', fontWeight: 800 }}>{hasLearningSession ? 'Building' : 'Not calibrated'}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
-                  <span style={{ color: '#64748B' }}>Tutor Mode:</span>
-                  <span style={{ color: '#2563EB', fontWeight: 700 }}>{activeTutorMode.toUpperCase()}</span>
-                </div>
-              </div>
-            </div>
+            <TeacherAnimation state={teacherState} />
 
             {hasLearningSession && (
-              <Button variant="primary" size="lg" to="/student/quiz" icon={Award} iconRight={ArrowRight} style={{ width: '100%' }}>
+              <Button
+                variant="primary"
+                size="lg"
+                to="/student/quiz"
+                icon={Award}
+                iconRight={ArrowRight}
+                style={{ width: '100%' }}
+              >
                 Proceed to Adaptive Quiz
               </Button>
             )}
