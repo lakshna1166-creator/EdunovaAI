@@ -195,6 +195,14 @@ def get_onnx_session() -> tuple[Any, Any]:
             be located.
         RuntimeError: if the ONNX session fails to initialise.
     """
+    logger.info(
+        "[EMBEDDINGS] get_onnx_session() entered | session_loaded=%s | "
+        "tokenizer_loaded=%s | thread=%s",
+        _SESSION_LOADED,
+        _TOKENIZER_LOADED,
+        threading.current_thread().name,
+        flush=True,
+    )
     global _ORT_SESSION  # noqa: PLW0603 - intentional module-level state
     global _TOKENIZER
     global _MODEL_DIR
@@ -231,28 +239,65 @@ def get_onnx_session() -> tuple[Any, Any]:
         _ensure_tokenizers_imported()
 
         # --- ONNX Runtime session ---
-        logger.info("[EMBEDDINGS] Creating ONNX InferenceSession...")
-        logger.info("[EMBEDDINGS] Model path: %s", model_path)
+        # Each log line below uses flush=True so that diagnostic output is
+        # not lost if the process is killed by Render's 120s request timeout
+        # *during* the InferenceSession constructor (which can take many
+        # seconds on cold start inside the 512 MiB RAM limit).
+        logger.info(
+            "[EMBEDDINGS] Preparing ONNX session | model=%s | threads=1 | "
+            "graph_opt=ORT_ENABLE_BASIC | provider=CPUExecutionProvider | "
+            "model_size_bytes=%d",
+            model_path.name,
+            model_path.stat().st_size,
+            flush=True,
+        )
+        logger.info(
+            "[EMBEDDINGS] Creating ONNX InferenceSession...",
+            flush=True,
+        )
         load_start = time.perf_counter()
-        so = _ORT_MODULE.SessionOptions()
-        so.intra_op_num_threads = 1
-        so.inter_op_num_threads = 1
-        so.graph_optimization_level = _ORT_MODULE.GraphOptimizationLevel.ORT_ENABLE_BASIC
         try:
+            logger.info(
+                "[EMBEDDINGS] step 1/3: building SessionOptions "
+                "(intra=1, inter=1, graph=ORT_ENABLE_BASIC)...",
+                flush=True,
+            )
+            so = _ORT_MODULE.SessionOptions()
+            so.intra_op_num_threads = 1
+            so.inter_op_num_threads = 1
+            so.graph_optimization_level = (
+                _ORT_MODULE.GraphOptimizationLevel.ORT_ENABLE_BASIC
+            )
+            logger.info(
+                "[EMBEDDINGS] step 2/3: SessionOptions built in %.2fs | "
+                "calling InferenceSession ctor now...",
+                time.perf_counter() - load_start,
+                flush=True,
+            )
             session = _ORT_MODULE.InferenceSession(
                 str(model_path),
                 sess_options=so,
                 providers=["CPUExecutionProvider"],
             )
         except Exception as exc:
+            logger.exception(
+                "[EMBEDDINGS] InferenceSession ctor FAILED after %.2fs | "
+                "error_type=%s | error=%s",
+                time.perf_counter() - load_start,
+                type(exc).__name__,
+                exc,
+            )
             raise RuntimeError(
                 f"Failed to initialise ONNX Runtime session for "
                 f"'{model_path}': {exc}"
             ) from exc
         load_time = time.perf_counter() - load_start
         logger.info(
-            "[EMBEDDINGS] ONNX InferenceSession created successfully | elapsed=%.2fs",
+            "[EMBEDDINGS] step 3/3: ONNX InferenceSession created successfully "
+            "| load=%.2fs | providers=%s",
             load_time,
+            session.get_providers(),
+            flush=True,
         )
         logger.info(
             "[EMBEDDINGS] ONNX session ready | model=%s | threads=1 | "
