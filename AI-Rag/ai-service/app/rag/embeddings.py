@@ -224,7 +224,28 @@ def get_onnx_session() -> tuple[Any, Any]:
         if _SESSION_LOADED and _TOKENIZER_LOADED:
             return _ORT_SESSION, _TOKENIZER
 
-        model_dir = _find_onnx_snapshot_dir()
+        # ----------------------------------------------------------------
+        # STEP 1: locate the pre-downloaded ONNX snapshot directory
+        # ----------------------------------------------------------------
+        logger.info("[EMBEDDINGS] STEP 1: finding ONNX snapshot")
+        step_start = time.perf_counter()
+        try:
+            model_dir = _find_onnx_snapshot_dir()
+        except Exception as exc:
+            logger.exception(
+                "[EMBEDDINGS] STEP 1 FAILED | error_type=%s | error=%s | "
+                "elapsed=%.2fs",
+                type(exc).__name__,
+                exc,
+                time.perf_counter() - step_start,
+            )
+            raise
+        logger.info(
+            "[EMBEDDINGS] STEP 1 DONE | path=%s | elapsed=%.2fs",
+            str(model_dir),
+            time.perf_counter() - step_start,
+        )
+
         model_path = model_dir / "model.onnx"
         tokenizer_path = model_dir / "tokenizer.json"
 
@@ -239,40 +260,85 @@ def get_onnx_session() -> tuple[Any, Any]:
                 "Re-run 'python scripts/download_model.py' during build."
             )
 
-        _ensure_onnxruntime_imported()
-        _ensure_tokenizers_imported()
-
-        # --- ONNX Runtime session ---
-        # These diagnostic log lines bracket the InferenceSession ctor so
-        # we can tell from Render logs whether session creation is hanging
-        # (e.g. due to OOM under the 512 MiB RAM limit) vs. running fine.
-        logger.info(
-            "[EMBEDDINGS] Preparing ONNX session | model=%s | threads=1 | "
-            "graph_opt=ORT_ENABLE_BASIC | provider=CPUExecutionProvider | "
-            "model_size_bytes=%d",
-            model_path.name,
-            model_path.stat().st_size,
-        )
-        logger.info(
-            "[EMBEDDINGS] Creating ONNX InferenceSession...",
-        )
-        load_start = time.perf_counter()
+        # ----------------------------------------------------------------
+        # STEP 2: lazy-import onnxruntime (~30 MiB RSS)
+        # ----------------------------------------------------------------
+        logger.info("[EMBEDDINGS] STEP 2: importing onnxruntime")
+        step_start = time.perf_counter()
         try:
-            logger.info(
-                "[EMBEDDINGS] step 1/3: building SessionOptions "
-                "(intra=1, inter=1, graph=ORT_ENABLE_BASIC)...",
+            _ensure_onnxruntime_imported()
+        except Exception as exc:
+            logger.exception(
+                "[EMBEDDINGS] STEP 2 FAILED | error_type=%s | error=%s | "
+                "elapsed=%.2fs",
+                type(exc).__name__,
+                exc,
+                time.perf_counter() - step_start,
             )
+            raise
+        logger.info(
+            "[EMBEDDINGS] STEP 2 DONE | elapsed=%.2fs",
+            time.perf_counter() - step_start,
+        )
+
+        # ----------------------------------------------------------------
+        # STEP 3: lazy-import tokenizers
+        # ----------------------------------------------------------------
+        logger.info("[EMBEDDINGS] STEP 3: importing tokenizers")
+        step_start = time.perf_counter()
+        try:
+            _ensure_tokenizers_imported()
+        except Exception as exc:
+            logger.exception(
+                "[EMBEDDINGS] STEP 3 FAILED | error_type=%s | error=%s | "
+                "elapsed=%.2fs",
+                type(exc).__name__,
+                exc,
+                time.perf_counter() - step_start,
+            )
+            raise
+        logger.info(
+            "[EMBEDDINGS] STEP 3 DONE | elapsed=%.2fs",
+            time.perf_counter() - step_start,
+        )
+
+        # ----------------------------------------------------------------
+        # STEP 4: build ONNX SessionOptions
+        # ----------------------------------------------------------------
+        logger.info("[EMBEDDINGS] STEP 4: creating ONNX SessionOptions")
+        step_start = time.perf_counter()
+        try:
             so = _ORT_MODULE.SessionOptions()
             so.intra_op_num_threads = 1
             so.inter_op_num_threads = 1
             so.graph_optimization_level = (
                 _ORT_MODULE.GraphOptimizationLevel.ORT_ENABLE_BASIC
             )
-            logger.info(
-                "[EMBEDDINGS] step 2/3: SessionOptions built in %.2fs | "
-                "calling InferenceSession ctor now...",
-                time.perf_counter() - load_start,
+        except Exception as exc:
+            logger.exception(
+                "[EMBEDDINGS] STEP 4 FAILED | error_type=%s | error=%s | "
+                "elapsed=%.2fs",
+                type(exc).__name__,
+                exc,
+                time.perf_counter() - step_start,
             )
+            raise
+        logger.info(
+            "[EMBEDDINGS] STEP 4 DONE | intra=1 inter=1 "
+            "graph_opt=ORT_ENABLE_BASIC | elapsed=%.2fs",
+            time.perf_counter() - step_start,
+        )
+
+        # ----------------------------------------------------------------
+        # STEP 5: create ONNX InferenceSession (the suspected bottleneck)
+        # ----------------------------------------------------------------
+        logger.info(
+            "[EMBEDDINGS] STEP 5: creating InferenceSession | model=%s | "
+            "optimization=ORT_ENABLE_BASIC | providers=[CPUExecutionProvider]",
+            model_path.name,
+        )
+        step_start = time.perf_counter()
+        try:
             session = _ORT_MODULE.InferenceSession(
                 str(model_path),
                 sess_options=so,
@@ -280,28 +346,18 @@ def get_onnx_session() -> tuple[Any, Any]:
             )
         except Exception as exc:
             logger.exception(
-                "[EMBEDDINGS] InferenceSession ctor FAILED after %.2fs | "
-                "error_type=%s | error=%s",
-                time.perf_counter() - load_start,
+                "[EMBEDDINGS] STEP 5 FAILED | error_type=%s | error=%s | "
+                "elapsed=%.2fs",
                 type(exc).__name__,
                 exc,
+                time.perf_counter() - step_start,
             )
-            raise RuntimeError(
-                f"Failed to initialise ONNX Runtime session for "
-                f"'{model_path}': {exc}"
-            ) from exc
-        load_time = time.perf_counter() - load_start
+            raise
         logger.info(
-            "[EMBEDDINGS] step 3/3: ONNX InferenceSession created successfully "
-            "| load=%.2fs | providers=%s",
-            load_time,
+            "[EMBEDDINGS] STEP 5 DONE | session created | elapsed=%.2fs | "
+            "active_providers=%s",
+            time.perf_counter() - step_start,
             session.get_providers(),
-        )
-        logger.info(
-            "[EMBEDDINGS] ONNX session ready | model=%s | threads=1 | "
-            "load=%.2fs",
-            model_path.name,
-            load_time,
         )
 
         # Discover I/O names from the model graph.
@@ -328,14 +384,31 @@ def get_onnx_session() -> tuple[Any, Any]:
         )
         _OUTPUT_NAME = output_meta[0].name
 
-        # --- Tokenizer ---
-        tok_start = time.perf_counter()
+        logger.info(
+            "[EMBEDDINGS] ONNX session ready | model=%s | threads=1 | "
+            "load=%.2fs",
+            model_path.name,
+            time.perf_counter() - step_start,
+        )
+
+        # ----------------------------------------------------------------
+        # STEP 6: load tokenizer
+        # ----------------------------------------------------------------
+        logger.info("[EMBEDDINGS] STEP 6: creating tokenizer")
+        step_start = time.perf_counter()
         try:
-            tokenizer = _TOKENIZERS_MODULE.Tokenizer.from_file(str(tokenizer_path))
+            tokenizer = _TOKENIZERS_MODULE.Tokenizer.from_file(
+                str(tokenizer_path)
+            )
         except Exception as exc:
-            raise RuntimeError(
-                f"Failed to load tokenizer from '{tokenizer_path}': {exc}"
-            ) from exc
+            logger.exception(
+                "[EMBEDDINGS] STEP 6 FAILED | error_type=%s | error=%s | "
+                "elapsed=%.2fs",
+                type(exc).__name__,
+                exc,
+                time.perf_counter() - step_start,
+            )
+            raise
         # Enable padding/truncation suitable for MiniLM (max 256 tokens is
         # well above any realistic chunk size for RAG; reduces memory).
         tokenizer.enable_padding(
@@ -344,17 +417,21 @@ def get_onnx_session() -> tuple[Any, Any]:
             length=256,
         )
         tokenizer.enable_truncation(max_length=256)
-        tok_time = time.perf_counter() - tok_start
         logger.info(
-            "[EMBEDDINGS] Tokenizer ready | load=%.2fs",
-            tok_time,
+            "[EMBEDDINGS] STEP 6 DONE | tokenizer ready | elapsed=%.2fs",
+            time.perf_counter() - step_start,
         )
 
+        # ----------------------------------------------------------------
+        # STEP 7: commit module-level state
+        # ----------------------------------------------------------------
+        logger.info("[EMBEDDINGS] STEP 7: marking session loaded")
         _ORT_SESSION = session
         _TOKENIZER = tokenizer
         _MODEL_DIR = model_dir
         _SESSION_LOADED = True
         _TOKENIZER_LOADED = True
+        logger.info("[EMBEDDINGS] STEP 7 DONE")
 
         return _ORT_SESSION, _TOKENIZER
 
