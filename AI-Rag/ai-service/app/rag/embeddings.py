@@ -215,7 +215,6 @@ def get_onnx_session() -> tuple[Any, Any]:
         _SESSION_LOADED,
         _TOKENIZER_LOADED,
         threading.current_thread().name,
-        flush=True,
     )
 
     if _SESSION_LOADED and _TOKENIZER_LOADED:
@@ -244,28 +243,24 @@ def get_onnx_session() -> tuple[Any, Any]:
         _ensure_tokenizers_imported()
 
         # --- ONNX Runtime session ---
-        # Each log line below uses flush=True so that diagnostic output is
-        # not lost if the process is killed by Render's 120s request timeout
-        # *during* the InferenceSession constructor (which can take many
-        # seconds on cold start inside the 512 MiB RAM limit).
+        # These diagnostic log lines bracket the InferenceSession ctor so
+        # we can tell from Render logs whether session creation is hanging
+        # (e.g. due to OOM under the 512 MiB RAM limit) vs. running fine.
         logger.info(
             "[EMBEDDINGS] Preparing ONNX session | model=%s | threads=1 | "
             "graph_opt=ORT_ENABLE_BASIC | provider=CPUExecutionProvider | "
             "model_size_bytes=%d",
             model_path.name,
             model_path.stat().st_size,
-            flush=True,
         )
         logger.info(
             "[EMBEDDINGS] Creating ONNX InferenceSession...",
-            flush=True,
         )
         load_start = time.perf_counter()
         try:
             logger.info(
                 "[EMBEDDINGS] step 1/3: building SessionOptions "
                 "(intra=1, inter=1, graph=ORT_ENABLE_BASIC)...",
-                flush=True,
             )
             so = _ORT_MODULE.SessionOptions()
             so.intra_op_num_threads = 1
@@ -277,7 +272,6 @@ def get_onnx_session() -> tuple[Any, Any]:
                 "[EMBEDDINGS] step 2/3: SessionOptions built in %.2fs | "
                 "calling InferenceSession ctor now...",
                 time.perf_counter() - load_start,
-                flush=True,
             )
             session = _ORT_MODULE.InferenceSession(
                 str(model_path),
@@ -302,7 +296,6 @@ def get_onnx_session() -> tuple[Any, Any]:
             "| load=%.2fs | providers=%s",
             load_time,
             session.get_providers(),
-            flush=True,
         )
         logger.info(
             "[EMBEDDINGS] ONNX session ready | model=%s | threads=1 | "
