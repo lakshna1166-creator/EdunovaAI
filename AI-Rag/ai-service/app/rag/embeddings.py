@@ -17,14 +17,11 @@ SentenceTransformer: Any = None
 # ---------------------------------------------------------------------------
 # Local model cache configuration
 # ---------------------------------------------------------------------------
-# The SentenceTransformer model is pre-downloaded into the local 'models/'
-# directory during the Render build step (see scripts/download_model.py).
-# This directory is committed to the repository so it is baked into the
-# Docker image. At runtime, we load exclusively from this local path with
-# local_files_only=True to avoid the remote download that was causing OOM
-# on the 512 MiB Render free tier.
-
-# Resolve the local models directory relative to the project root.
+# The SentenceTransformer model is pre-downloaded into the local 'models/' directory
+# during the Render build step (see scripts/download_model.py). This directory is
+# committed to the repository so it is baked into the Docker image. At runtime, we
+# load exclusively from this local path with local_files_only=True to avoid the
+# remote download that was causing OOM on the 512 MiB Render free tier.
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _LOCAL_MODELS_DIR = _PROJECT_ROOT / "models"
 
@@ -37,18 +34,27 @@ os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_LOCAL_MODELS_DIR / "hug
 # runs inside `transformers/__init__.py`) makes a live network request on import.
 # Setting TRANSFORMERS_NO_ADVISORY_WARNINGS=1 disables that check entirely.
 # HF_HUB_DISABLE_VERSION_CHECK further silences huggingface_hub telemetry pings.
-# TRANSFORMERS_OFFLINE=1 prevents ALL network operations during import, which
-# is critical for avoiding ~76s delays when running on Render's constrained
-# network environment. This is safe because the model is baked into the Docker
-# image — no version-resolution or downloads are needed at runtime.
+# HF_HUB_OFFLINE=1 prevents ALL network operations during import, which is critical
+# for avoiding ~76s delays when running on Render's constrained network environment.
+# This is safe because the model is baked into the Docker image — no
+# version-resolution or downloads are needed at runtime.
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_VERSION_CHECK", "1")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # Thread-safe model cache with lock for singleton pattern
 _MODEL_CACHE: dict[str, Any] = {}
 _CACHE_LOCK = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Initialization synchronization primitives
+# ---------------------------------------------------------------------------
+# Ensures only ONE SentenceTransformer initialization happens at a time.
+# Concurrent requests wait on the same initialization rather than starting
+# another one. Failures are handled cleanly and do not permanently stick.
+_INIT_EVENT: threading.Event = threading.Event()
+_INIT_IN_PROGRESS: bool = False
+_INIT_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 
 
@@ -96,7 +102,7 @@ def _background_import_preload() -> None:
     eliminates the ~80 s first-request penalty on Render without causing
     the 512 MiB OOM that the previous startup-preload approach produced.
     """
-    global SentenceTransformer, _IMPORT_PRELOAD_DONE  # noqa: PLW0603
+    global SentenceTransformer  # noqa: PLW0603 - intentional global rebind
     try:
         _t = time.perf_counter()
         from sentence_transformers import SentenceTransformer as _ST  # noqa: F401
@@ -168,41 +174,54 @@ def get_sentence_transformer(
                         models/ directory. Build-time downloads use
                         scripts/download_model.py instead.
     """
-    # LAZY import: this is the ONLY place we import sentence_transformers.
-    # It transitively imports torch (~150-250 MiB RSS at import time).
-    # Doing it here means PyTorch is initialised only on the first
-    # embedding request, AFTER uvicorn has already bound to $PORT.
-    #
-    # IMPORTANT: a daemon thread started by start_background_import_preload()
-    # (called from app/main.py lifespan) may have ALREADY imported the
-    # module while we were waiting for the first request. If so,
-    # `SentenceTransformer` is no longer None and we skip the import
-    # entirely — saving the full ~80 s cost on the first request.
-    global SentenceTransformer  # noqa: PLW0603 - intentional rebind for lazy load
-    if SentenceTransformer is None:
-        # Fallback: if the background preload didn't run (e.g. tests,
-        # or the thread is still in flight), do the import here.
-        # Timing the import separately lets us attribute first-request latency
-        # between the lazy import+init (PyTorch, numpy, etc.) vs the actual
-        # model loading vs the encode() call.
-        _import_start = time.perf_counter()
-        from sentence_transformers import SentenceTransformer as _SentenceTransformer
-        SentenceTransformer = _SentenceTransformer
-        logger.info(
-            "[PERF] sentence_transformers import: %.2fs",
-            time.perf_counter() - _import_start,
-        )
-    elif _IMPORT_PRELOAD_DONE:
-        # Background preload completed before the first request arrived —
-        # no import work needed here.
-        logger.debug(
-            "[PERF] sentence_transformers already preloaded in background; "
-            "skipping import on first request.",
-        )
+    global SentenceTransformer, _INIT_IN_PROGRESS, _INIT_EVENT  # noqa: PLW0603 - intentional rebind for lazy load
 
-    # If SentenceTransformer has been patched with a Mock (e.g. in unit tests), return mock call directly
+    # Check if initialization is already complete
+    if SentenceTransformer is not None and _INIT_EVENT.is_set():
+        # Initialization already completed, proceed to model loading
+        pass
+    else:
+        # Need to coordinate initialization
+        with _INIT_LOCK:
+            # Double-check after acquiring lock
+            if SentenceTransformer is None and not _INIT_IN_PROGRESS:
+                # We are responsible for initialization
+                _INIT_IN_PROGRESS = True
+                _INIT_EVENT.clear()  # Reset event for new initialization
+                
+                logger.info("[EMBEDDINGS] Initialization started")
+                _import_start = time.perf_counter()
+                try:
+                    from sentence_transformers import SentenceTransformer as _SentenceTransformer
+                    SentenceTransformer = _SentenceTransformer
+                    import_time = time.perf_counter() - _import_start
+                    logger.info("[PERF] sentence_transformers import: %.2fs", import_time)
+                except Exception as exc:
+                    logger.error("[EMBEDDINGS] Initialization failed: %s", exc)
+                    _INIT_IN_PROGRESS = False
+                    _INIT_EVENT.set()  # Wake up waiters even on failure
+                    raise
+            elif SentenceTransformer is None and _INIT_IN_PROGRESS:
+                # Another thread is initializing, wait for it
+                logger.debug("[EMBEDDINGS] Waiting for ongoing initialization...")
+                _INIT_EVENT.wait(timeout=None)  # Wait indefinitely
+                # After waiting, check if initialization succeeded
+                if SentenceTransformer is None:
+                    logger.error("[EMBEDDINGS] Initialization failed, retrying...")
+                    # Recurse to retry initialization
+                    return get_sentence_transformer(model_name, allow_download=allow_download)
+            # If we get here and SentenceTransformer is not None, initialization completed
+
+    # If SentenceTransformer has been patched with a Mock (e.g. in unit tests),
+    # still go through the cache to ensure only ONE mock instance is created
+    # across concurrent test calls.
     if isinstance(SentenceTransformer, (Mock, MagicMock, NonCallableMock, NonCallableMagicMock)):
-        return SentenceTransformer(model_name)
+        if model_name in _MODEL_CACHE:
+            return _MODEL_CACHE[model_name]
+        with _CACHE_LOCK:
+            if model_name not in _MODEL_CACHE:
+                _MODEL_CACHE[model_name] = SentenceTransformer(model_name)
+            return _MODEL_CACHE[model_name]
 
     # Thread-safe check and load
     if model_name not in _MODEL_CACHE:
@@ -256,8 +275,16 @@ def get_sentence_transformer(
                     ) from local_exc
                 load_time = time.perf_counter() - load_start
                 logger.info("[PERF] SentenceTransformer model load: %.2fs", load_time)
+                
+                # Mark initialization as complete
+                _INIT_IN_PROGRESS = False
+                _INIT_EVENT.set()
+            else:
+                # Another thread loaded the model while we waited for the lock
+                logger.debug("[EMBEDDINGS] Model loaded by another thread while waiting for lock")
     else:
         logger.debug("[EMBEDDINGS] Reusing cached SentenceTransformer model '%s'.", model_name)
+    
     return _MODEL_CACHE[model_name]
 
 

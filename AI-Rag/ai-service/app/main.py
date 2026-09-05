@@ -10,6 +10,8 @@ provider in `app.rag.embeddings`.
 from __future__ import annotations
 
 import logging
+import sys
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -49,9 +51,6 @@ async def lifespan(_: FastAPI):
     lazily on the first embedding call to avoid the 512 MiB OOM that the
     previous "load model at startup" approach caused.
     """
-    import sys
-    import os
-
     # Lightweight diagnostics — stdlib only, no extra dependencies.
     # These log lines help confirm Python version, PID, and that
     # SentenceTransformer has NOT been imported before the lifespan fires.
@@ -83,6 +82,30 @@ app.include_router(chat_router)
 app.include_router(teacher_router)
 
 
+@app.get("/")
+async def root():
+    """Root endpoint for Render health checks.
+    
+    Returns service status without loading any ML models or dependencies.
+    """
+    return {
+        "status": "ok",
+        "service": "EduNovaAI RAG"
+    }
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
+    """Lightweight health check endpoint.
+
+    This endpoint does NOT:
+    - load SentenceTransformer
+    - load PyTorch
+    - call Gemini
+    - query Supabase
+    - perform embedding
+    - perform RAG
+
+    It responds quickly and reliably for load balancer / orchestrator health checks.
+    """
     return {"status": "ok"}
