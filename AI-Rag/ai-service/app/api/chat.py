@@ -94,10 +94,52 @@ async def chat_with_rag(payload: ChatRequest) -> dict[str, Any]:
 
     The request body schema is preserved: { "question": "..." }.
     Missing/empty/whitespace questions are rejected by Pydantic with HTTP 422.
+
+    If the local ONNX embedding runtime has not been initialized at
+    startup (because `import onnxruntime` failed or timed out), this
+    endpoint returns HTTP 503 immediately rather than blocking for 120 s
+    on the import inside the request path.
     """
+    # Local import: avoid a module-level cycle on the embeddings package.
+    from app.rag.embeddings import (
+        is_onnxruntime_initialized,
+        is_onnxruntime_failed,
+    )
+
     request_start = time.perf_counter()
     question = payload.clean_question
     logger.info("[CHAT] Request received (len=%d)", len(question))
+
+    # Fast-fail if the ONNX runtime never came up. The request handler
+    # must NOT block on `import onnxruntime` (proven to hang/OOM the
+    # Render free-tier worker — see production logs).
+    if is_onnxruntime_failed():
+        logger.error(
+            "[CHAT] ONNX runtime not available (failed at startup). "
+            "Returning 503."
+        )
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": (
+                    "The local embedding runtime is not available. "
+                    "Please try again later."
+                )
+            },
+        )
+    if not is_onnxruntime_initialized():
+        logger.error(
+            "[CHAT] ONNX runtime not yet initialized. Returning 503."
+        )
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": (
+                    "The local embedding runtime is initializing. "
+                    "Please retry in a few seconds."
+                )
+            },
+        )
 
     try:
         result = answer_question(question)

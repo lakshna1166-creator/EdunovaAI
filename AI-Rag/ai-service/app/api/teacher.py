@@ -183,9 +183,44 @@ class TeacherEvaluationResponse(BaseModel):
     improvement: str
 
 
+def _check_onnx_available() -> None:
+    """Raise HTTPException 503 if the ONNX runtime is not available.
+
+    The request handler must NOT block on `import onnxruntime` (proven to
+    hang/OOM the Render free-tier worker — see production logs: STEP 2
+    logs "importing onnxruntime" but the request times out at 120 s with
+    no STEP 2 DONE). Instead, the FastAPI lifespan runs the import at
+    startup; if it failed, we return 503 immediately.
+    """
+    # Local import to avoid a module-level cycle.
+    from app.rag.embeddings import is_onnxruntime_failed, is_onnxruntime_initialized
+
+    if is_onnxruntime_failed():
+        logger.error("[TEACHER] ONNX runtime not available (failed at startup). Returning 503.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "The local embedding runtime is not available. "
+                "The service is likely running on a memory-constrained "
+                "instance (e.g. Render free tier) where onnxruntime "
+                "could not be imported. Please try again later."
+            ),
+        )
+    if not is_onnxruntime_initialized():
+        logger.error("[TEACHER] ONNX runtime not yet initialized. Returning 503.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "The local embedding runtime is initializing. "
+                "Please retry in a few seconds."
+            ),
+        )
+
+
 @router.post("/ask", response_model=TeacherAskResponse)
 async def ask_teacher(payload: TeacherAskRequest) -> dict[str, Any]:
     """Answer a student question with teacher-style explanations using the relevant PDF context."""
+    _check_onnx_available()
     question = payload.clean_question
     level = payload.level.strip().lower()
 
@@ -219,6 +254,7 @@ async def ask_teacher(payload: TeacherAskRequest) -> dict[str, Any]:
 @router.post("/quiz", response_model=TeacherQuizResponse)
 async def create_teacher_quiz(payload: TeacherQuizRequest) -> dict[str, Any]:
     """Generate quiz questions grounded in the educational material retrieved for the topic."""
+    _check_onnx_available()
     topic = payload.topic.strip()
     level = payload.level.strip().lower()
     n_questions = payload.number_of_questions
@@ -257,6 +293,7 @@ async def create_teacher_quiz(payload: TeacherQuizRequest) -> dict[str, Any]:
 @router.post("/evaluate", response_model=TeacherEvaluationResponse)
 async def evaluate_student_answer(payload: TeacherEvaluationRequest) -> dict[str, Any]:
     """Evaluate a student's answer using relevant educational context from the vector database."""
+    _check_onnx_available()
     question = payload.question.strip()
     student_answer = payload.student_answer.strip()
 

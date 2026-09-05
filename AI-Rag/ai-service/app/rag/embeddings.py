@@ -115,13 +115,25 @@ _ONNX_THREADS = int(os.getenv("ONNX_THREADS", "1"))
 # imported at module load. They are imported and instantiated on the first
 # embedding request. This keeps FastAPI startup / uvicorn port-binding
 # free of any heavy native library load.
+#
+# The `import onnxruntime` operation is KNOWN to block for >120 s / OOM-kill
+# the Render free-tier worker when invoked on the request path (confirmed by
+# production logs: "STEP 2: importing onnxruntime" appears but STEP 2 DONE
+# never does before the 120 s timeout).
+#
+# Therefore the import is performed ONCE at application startup by
+# `initialize_onnxruntime_diagnostics()`, called from the FastAPI lifespan.
+# The request path checks `_ORT_IMPORT_ERROR` and raises immediately if the
+# startup import failed — it NEVER re-attempts the import on the hot path.
 _RUNTIME_LOCK = threading.Lock()
 _ORT_IMPORTED = False
+_ORT_IMPORT_ERROR: str | None = None  # set if `import onnxruntime` fails at startup
 _TOKENIZERS_IMPORTED = False
 _SESSION_LOADED = False
 _TOKENIZER_LOADED = False
 
 _ORT_SESSION: Any = None
+_ORT_MODULE: Any = None  # the imported onnxruntime module (set after successful import)
 _TOKENIZER: Any = None
 _MODEL_DIR: Path | None = None
 _INPUT_IDS_NAME: str | None = None
@@ -199,74 +211,221 @@ def _read_rss_mib() -> float | None:
     return round(rss_bytes / 1024.0, 2)
 
 
-def _ensure_onnxruntime_imported() -> None:
-    """Import `onnxruntime` (and friends) exactly once.
+def is_onnxruntime_initialized() -> bool:
+    """Return True iff the `import onnxruntime` has already completed."""
+    return _ORT_IMPORTED
 
-    Importing `onnxruntime` (~30 MiB RSS) is delayed until the first
-    embedding request so that FastAPI startup remains light and the
-    background `start_background_import_preload` mechanism is no longer
-    needed.
+
+def is_onnxruntime_failed() -> bool:
+    """Return True iff the `import onnxruntime` attempt raised an exception."""
+    return _ORT_IMPORT_ERROR is not None
+
+
+def get_onnxruntime_error() -> str | None:
+    """Return the error message from a failed import, or None if OK."""
+    return _ORT_IMPORT_ERROR
+
+
+def _do_import_onnxruntime_inner() -> None:
+    """The actual `import onnxruntime` call, isolated for thread-pool dispatch.
+
+    This function:
+      * Bracket-logs the import with start/finish timestamps and RSS.
+      * Force-flushes logs so a hang/OOM is observable from disk.
+      * Sets `_ORT_IMPORTED = True` and stores the module in `_ORT_MODULE`
+        on success.
+      * Sets `_ORT_IMPORT_ERROR` and re-raises on failure.
     """
     global _ORT_IMPORTED  # noqa: PLW0603 - intentional one-time flag
-    if _ORT_IMPORTED:
-        return
-    with _RUNTIME_LOCK:
-        if _ORT_IMPORTED:
-            return
+    global _ORT_IMPORT_ERROR
+    global _ORT_MODULE
 
-        # ----------------------------------------------------------------
-        # DIAGNOSTIC: bracket the onnxruntime import so we can confirm
-        # whether THIS import is the operation that hangs / OOMs in the
-        # 512 MiB Render free tier. Exceptions are NOT swallowed.
-        # Force flush so logs appear to disk before a potential hang/kill.
-        # ----------------------------------------------------------------
-        logger.info(
-            "[EMBEDDINGS] _ensure_onnxruntime_imported() ENTER | "
-            "thread=%s | rss_before=%s MiB",
-            threading.current_thread().name,
+    logger.info(
+        "[ONNX_DIAG] STEP 1 START: importing onnxruntime | "
+        "thread=%s | rss_before=%s MiB",
+        threading.current_thread().name,
+        _read_rss_mib(),
+    )
+    _force_log_flush()
+    import_start = time.perf_counter()
+    try:
+        import onnxruntime as _ort  # noqa: F401 - imported lazily
+    except Exception as exc:
+        _ORT_IMPORT_ERROR = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        logger.exception(
+            "[ONNX_DIAG] STEP 1 FAILED: onnxruntime import raised | "
+            "error_type=%s | error=%s | elapsed=%.2fs | rss_after=%s MiB",
+            type(exc).__name__,
+            exc,
+            time.perf_counter() - import_start,
             _read_rss_mib(),
         )
         _force_log_flush()
-        import_start = time.perf_counter()
-        try:
-            logger.info(
-                "[EMBEDDINGS] _ensure_onnxruntime_imported() performing 'import onnxruntime' | "
-                "thread=%s | elapsed=%.2fs",
-                threading.current_thread().name,
-                time.perf_counter() - import_start,
-            )
-            _force_log_flush()
-            import onnxruntime as _ort  # noqa: F401 - imported lazily
-            import_done = time.perf_counter()
-            logger.info(
-                "[EMBEDDINGS] _ensure_onnxruntime_imported() 'import onnxruntime' RETURNED | "
-                "thread=%s | import_elapsed=%.2fs",
-                threading.current_thread().name,
-                import_done - import_start,
-            )
-        except Exception as exc:
-            logger.exception(
-                "[EMBEDDINGS] _ensure_onnxruntime_imported() FAILED: onnxruntime import raised | "
-                "error_type=%s | error=%s | elapsed=%.2fs | rss_after=%s MiB",
-                type(exc).__name__,
-                exc,
-                time.perf_counter() - import_start,
-                _read_rss_mib(),
-            )
-            raise
-        import_elapsed = time.perf_counter() - import_start
-        global _ORT_MODULE
-        _ORT_MODULE = _ort
-        _ORT_IMPORTED = True
+        raise
+    import_elapsed = time.perf_counter() - import_start
+    _ORT_MODULE = _ort
+    _ORT_IMPORTED = True
+    logger.info(
+        "[ONNX_DIAG] STEP 1 DONE: onnxruntime imported | "
+        "elapsed=%.2fs | rss_after=%s MiB | ort_version=%s | "
+        "available_providers=%s",
+        import_elapsed,
+        _read_rss_mib(),
+        getattr(_ort, "__version__", "unknown"),
+        list(getattr(_ort, "get_available_providers", lambda: [])()),
+    )
+    _force_log_flush()
+
+
+def initialize_onnxruntime_diagnostics(
+    *, timeout_seconds: float = 60.0
+) -> bool:
+    """Run the `import onnxruntime` step ONCE at application startup.
+
+    This is the SAFE initialization path. It is invoked from the FastAPI
+    `lifespan` startup handler, on a background thread, with a bounded
+    wall-clock timeout. It does NOT load the tokenizer, does NOT create
+    the ONNX InferenceSession, and does NOT touch Gemini/Supabase.
+
+    Returns:
+        True  if the import completed successfully.
+        False if the import failed or timed out.
+
+    The result is stored in module-level flags (`_ORT_IMPORTED`,
+    `_ORT_IMPORT_ERROR`) and is consumed by `_ensure_onnxruntime_imported`
+    on the request path. The request path will NEVER re-attempt the
+    import — it either returns immediately (already loaded) or raises
+    the recorded error (load failed).
+    """
+    global _ORT_IMPORTED, _ORT_IMPORT_ERROR
+
+    if _ORT_IMPORTED:
         logger.info(
-            "[EMBEDDINGS] _ensure_onnxruntime_imported() DONE | "
-            "total_elapsed=%.2fs | rss_after=%s MiB | ort_version=%s | "
-            "available_providers=%s",
-            import_elapsed,
-            _read_rss_mib(),
-            getattr(_ort, "__version__", "unknown"),
-            list(getattr(_ort, "get_available_providers", lambda: [])()),
+            "[ONNX_DIAG] initialize_onnxruntime_diagnostics() skipped "
+            "— already imported (ort_version=%s)",
+            getattr(_ORT_MODULE, "__version__", "unknown"),
         )
+        return True
+    if _ORT_IMPORT_ERROR is not None:
+        logger.warning(
+            "[ONNX_DIAG] initialize_onnxruntime_diagnostics() skipping "
+            "retry; previous error recorded: %s",
+            _ORT_IMPORT_ERROR,
+        )
+        return False
+
+    logger.info(
+        "[ONNX_DIAG] initialize_onnxruntime_diagnostics() START | "
+        "timeout=%.1fs | thread=main-lifespan",
+        timeout_seconds,
+    )
+    _force_log_flush()
+
+    import threading as _th
+    result_box: dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            _do_import_onnxruntime_inner()
+            result_box["ok"] = True
+        except BaseException as exc:  # noqa: BLE001
+            result_box["ok"] = False
+            result_box["error"] = f"{type(exc).__name__}: {exc}"
+
+    worker = _th.Thread(
+        target=_runner,
+        name="onnx-diagnostics-init",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=timeout_seconds)
+
+    if worker.is_alive():
+        # The import is still running. We deliberately do NOT kill the
+        # thread (Python cannot safely kill threads), but we record the
+        # timeout so the request path can surface a clear error.
+        _ORT_IMPORT_ERROR = (
+            f"onnxruntime import exceeded startup timeout of "
+            f"{timeout_seconds:.1f}s (likely OOM or hang on Render "
+            f"free tier — the import blocks indefinitely)."
+        )
+        logger.error(
+            "[ONNX_DIAG] initialize_onnxruntime_diagnostics() TIMEOUT | "
+            "timeout=%.1fs | rss_now=%s MiB | the import is still "
+            "running on a background thread; the FastAPI service will "
+            "remain healthy and the request path will return a 503 "
+            "explaining the situation.",
+            timeout_seconds,
+            _read_rss_mib(),
+        )
+        _force_log_flush()
+        return False
+
+    if result_box.get("ok"):
+        logger.info(
+            "[ONNX_DIAG] initialize_onnxruntime_diagnostics() SUCCESS | "
+            "ort_version=%s | rss_after=%s MiB",
+            getattr(_ORT_MODULE, "__version__", "unknown"),
+            _read_rss_mib(),
+        )
+        _force_log_flush()
+        return True
+
+    # The import raised. The error is already in _ORT_IMPORT_ERROR.
+    logger.error(
+        "[ONNX_DIAG] initialize_onnxruntime_diagnostics() FAILED | %s",
+        result_box.get("error", "unknown error"),
+    )
+    _force_log_flush()
+    return False
+
+
+def _ensure_onnxruntime_imported() -> None:
+    """Ensure `onnxruntime` is imported (request-path entry point).
+
+    PRODUCTION BEHAVIOUR (Render free tier, 512 MiB):
+        The `import onnxruntime` is KNOWN to block / OOM the worker
+        when invoked on the request path inside the asyncio event loop
+        (see production logs: STEP 2 logs "importing onnxruntime" but
+        the request then times out at 120 s, with no STEP 2 DONE).
+
+        To eliminate this failure mode, the import is performed EXACTLY
+        ONCE at application startup by
+        `initialize_onnxruntime_diagnostics()` (called from the FastAPI
+        `lifespan` handler, on a background thread, with a bounded
+        timeout).
+
+        On the request path, this function is a NO-OP if the runtime is
+        already initialized. If the import FAILED at startup, this
+        function raises a clear, actionable error IMMEDIATELY instead
+        of silently re-attempting the (proven-slow) import in the hot
+        path. The request handler in `app.api.teacher` and
+        `app.api.chat` translates this into a 503.
+    """
+    if _ORT_IMPORTED:
+        return
+    if _ORT_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "onnxruntime import previously failed at startup: "
+            f"{_ORT_IMPORT_ERROR}. Check Render logs for "
+            "[ONNX_DIAG] messages."
+        )
+    # Defensive: the FastAPI lifespan should have already called
+    # `initialize_onnxruntime_diagnostics()`. If we reach here on
+    # the request path, the startup initializer either has not run yet
+    # or it ran without invoking the diagnostic. We do NOT block on
+    # `import onnxruntime` here — we raise a clear error so the
+    # request fails fast (the chat/teacher handler will return 503)
+    # instead of hanging for 120 seconds.
+    raise RuntimeError(
+        "onnxruntime has not been initialized. The FastAPI lifespan "
+        "handler in `app/main.py` must call "
+        "`app.rag.embeddings.initialize_onnxruntime_diagnostics()` "
+        "before the first request. Check Render logs for [ONNX_DIAG] "
+        "or [STARTUP] messages to confirm startup completed."
+    )
 
 
 def _ensure_tokenizers_imported() -> None:
