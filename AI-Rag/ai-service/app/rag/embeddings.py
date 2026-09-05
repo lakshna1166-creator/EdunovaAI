@@ -144,6 +144,31 @@ def _find_onnx_snapshot_dir() -> Path:
 # ---------------------------------------------------------------------------
 # Lazy loaders
 # ---------------------------------------------------------------------------
+def _read_rss_mib() -> float | None:
+    """Best-effort resident-set-size in MiB using stdlib only.
+
+    Uses ``resource.getrusage(resource.RUSAGE_SELF).ru_maxrss`` on POSIX
+    (Render, Linux). On Windows, ``resource`` is unavailable and we
+    silently return ``None`` to avoid adding a runtime dependency.
+
+    Returns:
+        RSS in MiB or ``None`` if it cannot be measured on this OS.
+    """
+    try:
+        import resource  # noqa: PLC0415 - lazy stdlib import
+    except ImportError:
+        return None
+    try:
+        rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:  # pragma: no cover - defensive
+        return None
+    # On Linux, ru_maxrss is in kilobytes; on macOS it is in bytes.
+    # Render runs Linux so we treat the value as KiB.
+    if rss_bytes > 10 * 1024 * 1024:  # > 10 GiB ⇒ almost certainly bytes
+        return round(rss_bytes / (1024 * 1024), 2)
+    return round(rss_bytes / 1024.0, 2)
+
+
 def _ensure_onnxruntime_imported() -> None:
     """Import `onnxruntime` (and friends) exactly once.
 
@@ -158,10 +183,45 @@ def _ensure_onnxruntime_imported() -> None:
     with _RUNTIME_LOCK:
         if _ORT_IMPORTED:
             return
-        import onnxruntime as _ort  # noqa: F401 - imported lazily
+
+        # ----------------------------------------------------------------
+        # DIAGNOSTIC: bracket the onnxruntime import so we can confirm
+        # whether THIS import is the operation that hangs / OOMs in the
+        # 512 MiB Render free tier. No flush=True; uses the existing
+        # logger. Exceptions are NOT swallowed.
+        # ----------------------------------------------------------------
+        logger.info(
+            "[EMBEDDINGS] STEP 2 START: importing onnxruntime | "
+            "thread=%s | rss_before=%s MiB",
+            threading.current_thread().name,
+            _read_rss_mib(),
+        )
+        import_start = time.perf_counter()
+        try:
+            import onnxruntime as _ort  # noqa: F401 - imported lazily
+        except Exception as exc:
+            logger.exception(
+                "[EMBEDDINGS] STEP 2 FAILED: onnxruntime import raised | "
+                "error_type=%s | error=%s | elapsed=%.2fs | rss_after=%s MiB",
+                type(exc).__name__,
+                exc,
+                time.perf_counter() - import_start,
+                _read_rss_mib(),
+            )
+            raise
+        import_elapsed = time.perf_counter() - import_start
         global _ORT_MODULE
         _ORT_MODULE = _ort
         _ORT_IMPORTED = True
+        logger.info(
+            "[EMBEDDINGS] STEP 2 DONE: onnxruntime imported | "
+            "elapsed=%.2fs | rss_after=%s MiB | ort_version=%s | "
+            "available_providers=%s",
+            import_elapsed,
+            _read_rss_mib(),
+            getattr(_ort, "__version__", "unknown"),
+            list(getattr(_ort, "get_available_providers", lambda: [])()),
+        )
 
 
 def _ensure_tokenizers_imported() -> None:
