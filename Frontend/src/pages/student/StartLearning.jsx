@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { 
-  UploadCloud, 
-  ArrowRight, 
+import {
+  UploadCloud,
+  ArrowRight,
   Brain,
   FileText,
   Clock,
@@ -10,7 +10,6 @@ import {
   Sparkles,
   Layers,
   Globe,
-  Mic,
   CheckCircle2,
   AlertCircle,
   Loader2,
@@ -39,7 +38,6 @@ export default function StartLearning() {
   const [customTime, setCustomTime] = useState('');
   const [learningGoal, setLearningGoal] = useState('Understand Concept');
   const [teachingStyle, setTeachingStyle] = useState('Visual');
-  const [voicePreference, setVoicePreference] = useState('Friendly Socratic');
 
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
@@ -121,7 +119,6 @@ export default function StartLearning() {
         duration: availableTime === 'Custom' ? `${customTime || 25} minutes` : availableTime,
         goal: learningGoal,
         teachingStyle,
-        voicePreference,
         chapters: selectedChapters
       };
 
@@ -581,29 +578,6 @@ export default function StartLearning() {
                 </div>
               </div>
 
-              <div>
-                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 700, color: '#334155', marginBottom: '8px', textTransform: 'uppercase' }}>
-                  7. AI Voice / Persona Preference
-                </label>
-                <select
-                  value={voicePreference}
-                  onChange={(e) => setVoicePreference(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '12px 14px',
-                    borderRadius: '12px',
-                    border: '1px solid #CBD5E1',
-                    fontSize: '0.95rem',
-                    outline: 'none',
-                    background: '#FFFFFF',
-                    cursor: 'pointer'
-                  }}
-                >
-                  <option value="Friendly Socratic">Friendly Socratic (Inquiry & Hints)</option>
-                  <option value="Neutral AI">Neutral AI (Concise & Clear)</option>
-                  <option value="Academic Formal">Academic Formal (Rigorous Definitions)</option>
-                </select>
-              </div>
             </div>
           </div>
 
